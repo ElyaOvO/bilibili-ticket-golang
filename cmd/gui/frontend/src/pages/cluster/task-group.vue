@@ -24,6 +24,7 @@ interface IntentBrief { id: string; macroTaskId: string; purchaseGroupId?: strin
 const group = ref<TaskGroupSummary | null>(null); const macros = ref<MacroSummary[]>([]); const attempts = ref<AttemptBrief[]>([]); const intents = ref<IntentBrief[]>([]); const loading = ref(true)
 const dispatching = ref<Record<string, boolean>>({}); const dispatchingAll = ref(false)
 const activeTaskGroup = ref('')
+const activeTaskGroups = ref<string[]>([])
 const accountList = ref<AccountBrief[]>([])
 const groupAccountIds = ref<string[]>([])
 const workerList = ref<WorkerBrief[]>([])
@@ -158,6 +159,7 @@ async function loadAll(id: string, silent = false) {
         const nextGroup = ((snap.taskGroups || []) as TaskGroupSummary[]).find(g => g.id === id) || null
         group.value = nextGroup
         activeTaskGroup.value = snap.activeTaskGroup || ''
+        activeTaskGroups.value = (snap.activeTaskGroups || []) as string[]
         const allMacros = ((snap.macros || []) as MacroSummary[]).filter(m => m.taskGroupId === id)
         macros.value = allMacros
         intents.value = ((snap.intents || []) as IntentBrief[]).filter(i => allMacros.some(m => m.id === i.macroTaskId))
@@ -621,7 +623,7 @@ async function stopSingleIntent(intentID: string) {
 
 const dispatchableMacros = computed(() => macros.value.filter(m => m.purchaseGroups && m.purchaseGroups.length > 0))
 const anyRunning = computed(() => dispatchableMacros.value.some(m => hasLiveIntent(m)))
-const groupRunning = computed(() => anyRunning.value || (!!group.value && activeTaskGroup.value === group.value.id))
+const groupRunning = computed(() => anyRunning.value || (!!group.value && (activeTaskGroup.value === group.value.id || activeTaskGroups.value.includes(group.value.id))))
 const editingDisabled = computed(() => groupRunning.value || dispatchingAll.value)
 const accountPoolConfigured = computed(() => groupAccountIds.value.length > 0)
 const workerPoolConfigured = computed(() => groupPrimaryWorkerIds.value.length + groupStandbyWorkerIds.value.length > 0)

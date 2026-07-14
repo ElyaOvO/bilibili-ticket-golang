@@ -94,7 +94,7 @@ func (s *ClusterService) taskGroupByID(ctx context.Context, id string) (domain.T
 }
 
 func (s *ClusterService) taskGroupActive(ctx context.Context, taskGroupID string) bool {
-	if active := s.dispatcher.ActiveTaskGroup(); active == taskGroupID {
+	if s.dispatcher.TaskGroupReserved(taskGroupID) {
 		return true
 	}
 	macros, err := s.repository.ListMacroTasks(ctx)

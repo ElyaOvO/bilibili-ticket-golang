@@ -48,10 +48,6 @@ func (s *ClusterService) StopTaskGroup(taskGroupID string) error {
 	s.cancelTaskGroupWave(taskGroupID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	activeTaskGroupID := s.dispatcher.ActiveTaskGroup()
-	if activeTaskGroupID != "" && activeTaskGroupID != taskGroupID {
-		return fmt.Errorf("task group %s is not active; active task group is %s", taskGroupID, activeTaskGroupID)
-	}
 	return s.stopTaskGroupInternal(ctx, taskGroupID)
 }
 
@@ -123,10 +119,8 @@ func (s *ClusterService) stopTaskGroupInternal(ctx context.Context, taskGroupID 
 		}
 		s.dispatcher.DisarmMacro(macroID)
 	}
-	if activeTG := s.dispatcher.ActiveTaskGroup(); activeTG == taskGroupID {
-		s.dispatcher.ReleaseWorkers()
-		log.Printf("[cluster] released worker reservations for task group %s", taskGroupID)
-	}
+	s.dispatcher.ReleaseTaskGroup(taskGroupID)
+	log.Printf("[cluster] released resource reservations for task group %s", taskGroupID)
 
 	return nil
 }

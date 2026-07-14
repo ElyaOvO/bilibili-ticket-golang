@@ -17,15 +17,16 @@ import (
 
 // ClusterSnapshot is the full state snapshot sent to the frontend.
 type ClusterSnapshot struct {
-	TaskGroups      []domain.TaskGroup  `json:"taskGroups"`
-	Accounts        []AccountSummary    `json:"accounts"`
-	Buyers          []BuyerWithAccounts `json:"buyers"`
-	Workers         []WorkerSummary     `json:"workers"`
-	Macros          []MacroSummary      `json:"macros"`
-	Intents         []IntentSummary     `json:"intents"`
-	Attempts        []AttemptSummary    `json:"attempts"`
-	ActiveTaskGroup string              `json:"activeTaskGroup,omitempty"`
-	EmployerVersion string              `json:"employerVersion"` // employer build version (git commit hash)
+	TaskGroups       []domain.TaskGroup  `json:"taskGroups"`
+	Accounts         []AccountSummary    `json:"accounts"`
+	Buyers           []BuyerWithAccounts `json:"buyers"`
+	Workers          []WorkerSummary     `json:"workers"`
+	Macros           []MacroSummary      `json:"macros"`
+	Intents          []IntentSummary     `json:"intents"`
+	Attempts         []AttemptSummary    `json:"attempts"`
+	ActiveTaskGroup  string              `json:"activeTaskGroup,omitempty"`
+	ActiveTaskGroups []string            `json:"activeTaskGroups,omitempty"`
+	EmployerVersion  string              `json:"employerVersion"` // employer build version (git commit hash)
 }
 
 // BuyerAccountBadge represents an account that owns a particular buyer.

@@ -75,9 +75,8 @@ type Dispatcher struct {
 	stoppedPhases       map[domain.Phase]bool
 	workerReservations  map[string]string // workerID → taskGroupID
 	workerRoles         map[string]domain.ResourceRole
-	activeTaskGroup     string // current active task group ID (only one at a time)
-	retryIntervalMs     int64  // global retry interval (0 = use default 500ms)
-	startDelayMs        int64  // global start delay (0 = no early start)
+	retryIntervalMs     int64 // global retry interval (0 = use default 500ms)
+	startDelayMs        int64 // global start delay (0 = no early start)
 }
 
 func (d *Dispatcher) SetSuccessHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult)) {
@@ -88,6 +87,22 @@ func (d *Dispatcher) SetSuccessHandler(handler func(domain.LogicalOrderIntent, d
 
 func New(client WorkerClient, repository Repository, resolver MappingResolver) *Dispatcher {
 	return &Dispatcher{client: client, repository: repository, resolver: resolver, plans: make(map[string]*IntentPlan), attempts: make(map[string]*attempt), accounts: make(map[string]domain.Account), workers: make(map[string]domain.WorkerNode), accountBusy: make(map[string]string), workerBusy: make(map[string]string), accountReservations: make(map[string]string), failedWorkers: make(map[string]time.Time), quarantinedAccounts: make(map[string]time.Time), workerCooldown: make(map[string]time.Time), stoppedPhases: make(map[domain.Phase]bool), workerReservations: make(map[string]string), workerRoles: make(map[string]domain.ResourceRole), now: time.Now}
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // SetGlobalConfig updates the dispatcher's runtime configuration. Values
@@ -113,66 +128,158 @@ func (d *Dispatcher) SetResources(accounts []domain.Account, workers []domain.Wo
 	d.accounts, d.workers = nextAccounts, nextWorkers
 }
 
-// ReserveWorkers locks a set of workers for a task group.  Only the active
-// task group's workers may be picked during Reconcile.  Passing an empty
-// set releases all reservations.
-func (d *Dispatcher) ReserveWorkers(taskGroupID string, workerIDs []string) {
-	d.ReserveWorkerPools(taskGroupID, workerIDs, nil)
+// ReserveWorkers locks a set of workers for a task group.
+func (d *Dispatcher) ReserveWorkers(taskGroupID string, workerIDs []string) error {
+	return d.ReserveWorkerPools(taskGroupID, workerIDs, nil)
 }
 
-// ReserveAccounts locks a set of accounts for a task group. Only the active
-// task group's accounts may be picked during Reconcile.
-func (d *Dispatcher) ReserveAccounts(taskGroupID string, accountIDs []string) {
+// ReserveAccounts locks a set of accounts for a task group. Reservations are
+// resource-scoped, so multiple task groups can run concurrently when their
+// account pools do not overlap.
+func (d *Dispatcher) ReserveAccounts(taskGroupID string, accountIDs []string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.accountReservations = make(map[string]string, len(accountIDs))
+	for _, id := range uniqueNonEmpty(accountIDs) {
+		if owner := d.accountReservations[id]; owner != "" && owner != taskGroupID {
+			return fmt.Errorf("account %s is already reserved by task group %s", id, owner)
+		}
+	}
+	for id, owner := range d.accountReservations {
+		if owner == taskGroupID {
+			delete(d.accountReservations, id)
+		}
+	}
 	for _, id := range accountIDs {
 		if id == "" {
 			continue
 		}
 		d.accountReservations[id] = taskGroupID
 	}
-	d.activeTaskGroup = taskGroupID
+	return nil
 }
 
 // ReserveWorkerPools locks primary and standby worker pools for a task group.
 // Standby workers are reserved by the task group immediately, but are only
 // selected to replace failed primary workers.  If no primary pool is configured,
 // standby workers act as the only available pool.
-func (d *Dispatcher) ReserveWorkerPools(taskGroupID string, primaryWorkerIDs, standbyWorkerIDs []string) {
+func (d *Dispatcher) ReserveWorkerPools(taskGroupID string, primaryWorkerIDs, standbyWorkerIDs []string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.workerReservations = make(map[string]string, len(primaryWorkerIDs)+len(standbyWorkerIDs))
-	d.workerRoles = make(map[string]domain.ResourceRole, len(primaryWorkerIDs)+len(standbyWorkerIDs))
+	requested := append(uniqueNonEmpty(primaryWorkerIDs), uniqueNonEmpty(standbyWorkerIDs)...)
+	for _, id := range uniqueNonEmpty(requested) {
+		if owner := d.workerReservations[id]; owner != "" && owner != taskGroupID {
+			return fmt.Errorf("worker %s is already reserved by task group %s", id, owner)
+		}
+	}
+	for id, owner := range d.workerReservations {
+		if owner == taskGroupID {
+			delete(d.workerReservations, id)
+			delete(d.workerRoles, id)
+		}
+	}
 	for _, id := range primaryWorkerIDs {
+		if id == "" {
+			continue
+		}
 		d.workerReservations[id] = taskGroupID
 		d.workerRoles[id] = domain.RolePrimary
 	}
 	for _, id := range standbyWorkerIDs {
+		if id == "" {
+			continue
+		}
 		if _, exists := d.workerReservations[id]; exists {
 			continue
 		}
 		d.workerReservations[id] = taskGroupID
 		d.workerRoles[id] = domain.RoleStandby
 	}
-	d.activeTaskGroup = taskGroupID
+	return nil
 }
 
-// ReleaseWorkers clears the worker reservations.
+// ReleaseWorkers clears all task-group resource reservations.
 func (d *Dispatcher) ReleaseWorkers() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.accountReservations = make(map[string]string)
 	d.workerReservations = make(map[string]string)
 	d.workerRoles = make(map[string]domain.ResourceRole)
-	d.activeTaskGroup = ""
 }
 
-// ActiveTaskGroup returns the currently reserved task group ID (empty if none).
+// ReleaseTaskGroup clears resource reservations owned by a single task group.
+func (d *Dispatcher) ReleaseTaskGroup(taskGroupID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, owner := range d.accountReservations {
+		if owner == taskGroupID {
+			delete(d.accountReservations, id)
+		}
+	}
+	for id, owner := range d.workerReservations {
+		if owner == taskGroupID {
+			delete(d.workerReservations, id)
+			delete(d.workerRoles, id)
+		}
+	}
+}
+
+// ActiveTaskGroup returns the only reserved task group ID. It is kept for
+// backwards-compatible UI hints; when multiple task groups are active it returns
+// an empty string.
 func (d *Dispatcher) ActiveTaskGroup() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.activeTaskGroup
+	ids := d.activeTaskGroupIDsLocked()
+	if len(ids) != 1 {
+		return ""
+	}
+	return ids[0]
+}
+
+func (d *Dispatcher) ActiveTaskGroups() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.activeTaskGroupIDsLocked()
+}
+
+func (d *Dispatcher) TaskGroupReserved(taskGroupID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.taskGroupReservedLocked(taskGroupID)
+}
+
+func (d *Dispatcher) activeTaskGroupIDsLocked() []string {
+	seen := make(map[string]struct{})
+	for _, id := range d.accountReservations {
+		if id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	for _, id := range d.workerReservations {
+		if id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (d *Dispatcher) taskGroupReservedLocked(taskGroupID string) bool {
+	for _, owner := range d.accountReservations {
+		if owner == taskGroupID {
+			return true
+		}
+	}
+	for _, owner := range d.workerReservations {
+		if owner == taskGroupID {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Dispatcher) MarkWorkerHealthy(workerID string) {
@@ -551,20 +658,30 @@ func (d *Dispatcher) totalSlotCount(plans []*IntentPlan) int {
 	}
 	active := 0
 	planIDs := make(map[string]struct{}, len(plans))
+	groupPlans := make(map[string][]*IntentPlan)
 	for _, plan := range plans {
 		planIDs[plan.Intent.ID] = struct{}{}
+		groupPlans[plan.TaskGroup.ID] = append(groupPlans[plan.TaskGroup.ID], plan)
 	}
 	for _, current := range d.attempts {
 		if _, ok := planIDs[current.planID]; ok && !current.value.State.Terminal() {
 			active++
 		}
 	}
-	idleAccounts := len(d.availableAccounts())
-	idleWorkers := d.availableWorkerCount(plans)
-	if idleAccounts < idleWorkers {
-		return active + idleAccounts
+	idleSlots := 0
+	for _, plans := range groupPlans {
+		if len(plans) == 0 {
+			continue
+		}
+		idleAccounts := len(d.availableAccounts(plans[0]))
+		idleWorkers := d.availableWorkerCount(plans)
+		if idleAccounts < idleWorkers {
+			idleSlots += idleAccounts
+		} else {
+			idleSlots += idleWorkers
+		}
 	}
-	return active + idleWorkers
+	return active + idleSlots
 }
 
 func (d *Dispatcher) allocationTargets(plans []*IntentPlan, totalSlots int) map[string]int {
@@ -889,10 +1006,10 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 }
 
 func (d *Dispatcher) pickResources(ctx context.Context, plan *IntentPlan) (domain.Account, domain.WorkerNode, bool, error) {
-	accounts := d.availableAccounts()
+	accounts := d.availableAccounts(plan)
 	primaryWorkers := make([]domain.WorkerNode, 0, len(d.workers))
 	standbyWorkers := make([]domain.WorkerNode, 0, len(d.workers))
-	standbySlots := d.availableStandbySlots()
+	standbySlots := d.availableStandbySlots(plan)
 	for _, value := range d.workers {
 		if !d.workerAvailableForPlan(value, plan) {
 			continue
@@ -934,7 +1051,7 @@ func (d *Dispatcher) pickResources(ctx context.Context, plan *IntentPlan) (domai
 	return accounts[0], workers[0], true, nil
 }
 
-func (d *Dispatcher) availableAccounts() []domain.Account {
+func (d *Dispatcher) availableAccounts(plan *IntentPlan) []domain.Account {
 	accounts := make([]domain.Account, 0, len(d.accounts))
 	recoveredAccounts := make([]domain.Account, 0)
 	for _, value := range d.accounts {
@@ -946,8 +1063,12 @@ func (d *Dispatcher) availableAccounts() []domain.Account {
 		if !value.Enabled || d.accountBusy[value.ID] != "" || value.CooldownUntil.After(d.now()) {
 			continue
 		}
-		if d.activeTaskGroup != "" {
-			if tg, ok := d.accountReservations[value.ID]; !ok || tg != d.activeTaskGroup {
+		if len(d.accountReservations) > 0 {
+			if plan == nil || plan.TaskGroup.ID == "" {
+				if _, reserved := d.accountReservations[value.ID]; reserved {
+					continue
+				}
+			} else if tg, ok := d.accountReservations[value.ID]; !ok || tg != plan.TaskGroup.ID {
 				continue
 			}
 		}
@@ -965,20 +1086,17 @@ func (d *Dispatcher) availableAccounts() []domain.Account {
 
 func (d *Dispatcher) availableWorkerCount(plans []*IntentPlan) int {
 	count := 0
-	standbySlots := d.availableStandbySlots()
-	countedStandby := 0
+	countedStandby := make(map[string]int)
 	for _, worker := range d.workers {
-		if d.workerRoles[worker.ID] == domain.RoleStandby {
-			if countedStandby >= standbySlots {
-				continue
-			}
-		}
 		for _, plan := range plans {
 			if d.workerAvailableForPlan(worker, plan) {
-				count++
 				if d.workerRoles[worker.ID] == domain.RoleStandby {
-					countedStandby++
+					if countedStandby[plan.TaskGroup.ID] >= d.availableStandbySlots(plan) {
+						continue
+					}
+					countedStandby[plan.TaskGroup.ID]++
 				}
+				count++
 				break
 			}
 		}
@@ -1002,23 +1120,31 @@ func (d *Dispatcher) workerAvailableForPlan(worker domain.WorkerNode, plan *Inte
 			return false
 		}
 	}
-	if d.activeTaskGroup != "" {
-		if tg, ok := d.workerReservations[worker.ID]; !ok || tg != d.activeTaskGroup {
+	if len(d.workerReservations) > 0 {
+		if plan == nil || plan.TaskGroup.ID == "" {
+			if _, reserved := d.workerReservations[worker.ID]; reserved {
+				return false
+			}
+		} else if tg, ok := d.workerReservations[worker.ID]; !ok || tg != plan.TaskGroup.ID {
 			return false
 		}
 	}
-	if d.workerRoles[worker.ID] == domain.RoleStandby && d.availableStandbySlots() <= 0 {
+	if d.workerRoles[worker.ID] == domain.RoleStandby && d.availableStandbySlots(plan) <= 0 {
 		return false
 	}
 	return true
 }
 
-func (d *Dispatcher) availableStandbySlots() int {
+func (d *Dispatcher) availableStandbySlots(plan *IntentPlan) int {
 	hasPrimary := false
 	failedPrimary := 0
 	busyStandby := 0
+	standbyCount := 0
 	now := d.now()
 	for workerID, role := range d.workerRoles {
+		if plan != nil && plan.TaskGroup.ID != "" && d.workerReservations[workerID] != plan.TaskGroup.ID {
+			continue
+		}
 		switch role {
 		case domain.RolePrimary:
 			hasPrimary = true
@@ -1030,13 +1156,14 @@ func (d *Dispatcher) availableStandbySlots() int {
 			}
 			failedPrimary++
 		case domain.RoleStandby:
+			standbyCount++
 			if d.workerBusy[workerID] != "" {
 				busyStandby++
 			}
 		}
 	}
 	if !hasPrimary {
-		return len(d.workerRoles)
+		return standbyCount
 	}
 	slots := failedPrimary - busyStandby
 	if slots < 0 {

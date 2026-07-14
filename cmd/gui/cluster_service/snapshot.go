@@ -64,7 +64,7 @@ func (s *ClusterService) Snapshot() (ClusterSnapshot, error) {
 		}
 		buyersWithAccounts[i] = BuyerWithAccounts{Buyer: b, Accounts: accs}
 	}
-	result := ClusterSnapshot{TaskGroups: taskGroups, Buyers: buyersWithAccounts, ActiveTaskGroup: s.dispatcher.ActiveTaskGroup(), EmployerVersion: global.GitCommit}
+	result := ClusterSnapshot{TaskGroups: taskGroups, Buyers: buyersWithAccounts, ActiveTaskGroup: s.dispatcher.ActiveTaskGroup(), ActiveTaskGroups: s.dispatcher.ActiveTaskGroups(), EmployerVersion: global.GitCommit}
 
 	for _, account := range accountList {
 		summary := AccountSummary{ID: account.ID, Name: account.Name, Tags: normalizeAccountTags(account.Tags), Enabled: account.Enabled, VipStatus: account.VipStatus, CredentialVersion: account.Credentials.Version}

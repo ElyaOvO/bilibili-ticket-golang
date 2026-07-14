@@ -218,10 +218,14 @@ func TestTaskGroupAccountScope(t *testing.T) {
 	d := New(c, nil, nil)
 	accounts, workers := resourcesN(3)
 	d.SetResources(accounts, workers)
-	d.ReserveAccounts("g", []string{"a2"})
-	d.ReserveWorkerPools("g", []string{"w1", "w2", "w3"}, nil)
+	if err := d.ReserveAccounts("g", []string{"a2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveWorkerPools("g", []string{"w1", "w2", "w3"}, nil); err != nil {
+		t.Fatal(err)
+	}
 	macro := dispatchMacro("m", 0)
-	d.Add(IntentPlan{Macro: macro, Intent: dispatchIntent("i", "m", 10, "buyer")})
+	d.Add(IntentPlan{TaskGroup: domain.TaskGroup{ID: "g"}, Macro: macro, Intent: dispatchIntent("i", "m", 10, "buyer")})
 	if err := d.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -234,15 +238,74 @@ func TestTaskGroupAccountScope(t *testing.T) {
 	}
 }
 
+func TestMultipleTaskGroupsUseSeparateReservations(t *testing.T) {
+	c := &client{states: make(map[string]WorkerStatus)}
+	d := New(c, nil, nil)
+	accounts, workers := resourcesN(4)
+	d.SetResources(accounts, workers)
+	if err := d.ReserveAccounts("g1", []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveWorkerPools("g1", []string{"w1"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveAccounts("g2", []string{"a2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveWorkerPools("g2", []string{"w2"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	d.Add(IntentPlan{TaskGroup: domain.TaskGroup{ID: "g1"}, Macro: dispatchMacro("m1", 0), Intent: dispatchIntent("i1", "m1", 1, "buyer1")})
+	d.Add(IntentPlan{TaskGroup: domain.TaskGroup{ID: "g2"}, Macro: dispatchMacro("m2", 0), Intent: dispatchIntent("i2", "m2", 1, "buyer2")})
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	attempts := d.Attempts()
+	if len(attempts) != 2 {
+		t.Fatalf("expected one attempt per task group, got %#v", attempts)
+	}
+	byIntent := make(map[string]domain.ExecutionAttempt, len(attempts))
+	for _, attempt := range attempts {
+		byIntent[attempt.IntentID] = attempt
+	}
+	if got := byIntent["i1"]; got.AccountID != "a1" || got.WorkerID != "w1" {
+		t.Fatalf("group 1 used wrong resources: %#v", got)
+	}
+	if got := byIntent["i2"]; got.AccountID != "a2" || got.WorkerID != "w2" {
+		t.Fatalf("group 2 used wrong resources: %#v", got)
+	}
+}
+
+func TestTaskGroupReservationsRejectOverlaps(t *testing.T) {
+	d := New(&client{states: make(map[string]WorkerStatus)}, nil, nil)
+	if err := d.ReserveAccounts("g1", []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveAccounts("g2", []string{"a1"}); err == nil {
+		t.Fatal("expected overlapping account reservation to be rejected")
+	}
+	if err := d.ReserveWorkerPools("g1", []string{"w1"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveWorkerPools("g2", []string{"w1"}, nil); err == nil {
+		t.Fatal("expected overlapping worker reservation to be rejected")
+	}
+}
+
 func TestTaskGroupStandbyWorkersStayIdleUntilPrimaryFails(t *testing.T) {
 	c := &client{states: make(map[string]WorkerStatus)}
 	d := New(c, nil, nil)
 	accounts, workers := resourcesN(4)
 	d.SetResources(accounts, workers)
-	d.ReserveAccounts("g", []string{"a1", "a2", "a3", "a4"})
-	d.ReserveWorkerPools("g", []string{"w2"}, []string{"w4"})
+	if err := d.ReserveAccounts("g", []string{"a1", "a2", "a3", "a4"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveWorkerPools("g", []string{"w2"}, []string{"w4"}); err != nil {
+		t.Fatal(err)
+	}
 	macro := dispatchMacro("m", 0)
-	d.Add(IntentPlan{Macro: macro, Intent: dispatchIntent("i", "m", 10, "buyer")})
+	d.Add(IntentPlan{TaskGroup: domain.TaskGroup{ID: "g"}, Macro: macro, Intent: dispatchIntent("i", "m", 10, "buyer")})
 	if err := d.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -259,11 +322,15 @@ func TestTaskGroupStandbyWorkersReplaceFailedPrimaryWorkers(t *testing.T) {
 	d := New(c, nil, nil)
 	accounts, workers := resourcesN(5)
 	d.SetResources(accounts, workers)
-	d.ReserveAccounts("g", []string{"a1", "a2", "a3", "a4", "a5"})
-	d.ReserveWorkerPools("g", []string{"w1", "w2"}, []string{"w3", "w4", "w5"})
+	if err := d.ReserveAccounts("g", []string{"a1", "a2", "a3", "a4", "a5"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ReserveWorkerPools("g", []string{"w1", "w2"}, []string{"w3", "w4", "w5"}); err != nil {
+		t.Fatal(err)
+	}
 	d.failedWorkers["w1"] = d.now()
 	macro := dispatchMacro("m", 0)
-	d.Add(IntentPlan{Macro: macro, Intent: dispatchIntent("i", "m", 10, "buyer")})
+	d.Add(IntentPlan{TaskGroup: domain.TaskGroup{ID: "g"}, Macro: macro, Intent: dispatchIntent("i", "m", 10, "buyer")})
 	if err := d.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}

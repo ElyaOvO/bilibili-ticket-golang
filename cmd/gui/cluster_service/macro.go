@@ -262,12 +262,6 @@ func (s *ClusterService) startTaskGroupPhase(taskGroupID string, phase domain.Ph
 	if err := s.refreshResources(ctx); err != nil {
 		return err
 	}
-	if activeTaskGroup := s.dispatcher.ActiveTaskGroup(); activeTaskGroup != "" {
-		if activeTaskGroup == taskGroupID {
-			return fmt.Errorf("task group %s is already running; stop it before starting again", taskGroupID)
-		}
-		return fmt.Errorf("task group %s is already running; stop it before starting task group %s", activeTaskGroup, taskGroupID)
-	}
 	if s.taskGroupActive(ctx, taskGroupID) {
 		return fmt.Errorf("task group %s is already running; stop it before starting again", taskGroupID)
 	}
@@ -308,14 +302,19 @@ func (s *ClusterService) startTaskGroupPhase(taskGroupID string, phase domain.Ph
 
 	// Reserve accounts and workers before planning so Reconcile only sees
 	// allowed resources.
-	s.dispatcher.ReserveAccounts(taskGroupID, accountIDs)
-	s.dispatcher.ReserveWorkerPools(taskGroupID, primaryWorkerIDs, standbyWorkerIDs)
+	if err := s.dispatcher.ReserveAccounts(taskGroupID, accountIDs); err != nil {
+		return err
+	}
+	if err := s.dispatcher.ReserveWorkerPools(taskGroupID, primaryWorkerIDs, standbyWorkerIDs); err != nil {
+		s.dispatcher.ReleaseTaskGroup(taskGroupID)
+		return err
+	}
 	log.Printf("[cluster] reserved %d accounts, %d primary and %d standby workers for task group %s", len(accountIDs), len(primaryWorkerIDs), len(standbyWorkerIDs), taskGroupID)
 	s.RecordDispatchInfo("reserve", fmt.Sprintf("task group %s reserved %d account(s), %d primary worker(s), %d standby worker(s)", taskGroupID, len(accountIDs), len(primaryWorkerIDs), len(standbyWorkerIDs)))
 
 	macros, err := s.repository.ListMacroTasks(ctx)
 	if err != nil {
-		s.dispatcher.ReleaseWorkers()
+		s.dispatcher.ReleaseTaskGroup(taskGroupID)
 		return err
 	}
 	selected := make([]domain.MacroTask, 0)
@@ -325,7 +324,7 @@ func (s *ClusterService) startTaskGroupPhase(taskGroupID string, phase domain.Ph
 		}
 	}
 	if len(selected) == 0 {
-		s.dispatcher.ReleaseWorkers()
+		s.dispatcher.ReleaseTaskGroup(taskGroupID)
 		return fmt.Errorf("task group has no macro tasks")
 	}
 
@@ -335,7 +334,7 @@ func (s *ClusterService) startTaskGroupPhase(taskGroupID string, phase domain.Ph
 		for _, macro := range selected {
 			s.dispatcher.DisarmMacro(macro.ID)
 		}
-		s.dispatcher.ReleaseWorkers()
+		s.dispatcher.ReleaseTaskGroup(taskGroupID)
 		log.Printf("[cluster] start task group %s rolled back: %s", taskGroupID, reason)
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
