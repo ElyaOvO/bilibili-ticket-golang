@@ -187,6 +187,7 @@ type ClusterService struct {
 	captchaSolver        biliutils.CaptchaSolverFn
 	catalog              *biliutils.BiliClient
 	cancel               context.CancelFunc
+	lifecycleCtx         context.Context
 	notify               func(string)
 	wailsApp             *application.App
 	globalCfg            globalConfig        // pushed to all workers via Configure RPC

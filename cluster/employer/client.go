@@ -174,6 +174,11 @@ func (c *WorkerClient) getClientLocked(node domain.WorkerNode) (pb.WorkerService
 // ensureHeartbeat starts the heartbeat stream for a worker that has
 // already passed the protocol version check.  Idempotent.
 func (c *WorkerClient) ensureHeartbeat(node domain.WorkerNode, wc *workerConn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.workers[node.ID] != wc {
+		return
+	}
 	if wc.hbCancel != nil {
 		return // already running
 	}
@@ -189,6 +194,8 @@ func (c *WorkerClient) startHeartbeat(node domain.WorkerNode, wc *workerConn) {
 		// Keep lastHeartbeat as time.Now() so the worker is considered alive
 		// for the grace period; the next call to getClient will retry.
 		log.Printf("[worker-client] heartbeat stream to %s failed (will retry): %v", node.ID, err)
+		cancel()
+		wc.hbCancel = nil
 		return
 	}
 
@@ -196,7 +203,14 @@ func (c *WorkerClient) startHeartbeat(node domain.WorkerNode, wc *workerConn) {
 
 	// Read heartbeats from the worker.
 	go func() {
-		defer cancel()
+		defer func() {
+			cancel()
+			c.mu.Lock()
+			if c.workers[node.ID] == wc {
+				wc.hbCancel = nil
+			}
+			c.mu.Unlock()
+		}()
 		for {
 			msg, err := stream.Recv()
 			if err != nil {

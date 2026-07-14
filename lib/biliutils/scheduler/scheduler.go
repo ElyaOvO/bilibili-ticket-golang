@@ -79,24 +79,24 @@ func (ds *DynamicScheduler) HasTask(id string) bool {
 // RemoveTask removes a task by ID.
 func (ds *DynamicScheduler) RemoveTask(taskID string) {
 	ds.mutex.Lock()
-	defer ds.mutex.Unlock()
-
-	if task, exists := ds.tasks[taskID]; exists {
+	task := ds.tasks[taskID]
+	delete(ds.tasks, taskID)
+	ds.mutex.Unlock()
+	if task != nil {
 		task.Stop()
-		delete(ds.tasks, taskID)
 	}
 }
 
-// RemoveTaskAndStream removes a task by ID and invokes onRemove after deletion
-// while still holding the scheduler lock — useful for closing associated
-// resources (log streams, etc.) without racing with a re-add.
+// RemoveTaskAndStream removes a task by ID, stops it outside the scheduler
+// lock, and then closes associated resources. Stopping outside the lock avoids
+// deadlocking when a task's terminal callback re-enters the scheduler.
 func (ds *DynamicScheduler) RemoveTaskAndStream(taskID string, onRemove func()) {
 	ds.mutex.Lock()
-	defer ds.mutex.Unlock()
-
-	if task, exists := ds.tasks[taskID]; exists {
+	task := ds.tasks[taskID]
+	delete(ds.tasks, taskID)
+	ds.mutex.Unlock()
+	if task != nil {
 		task.Stop()
-		delete(ds.tasks, taskID)
 	}
 	if onRemove != nil {
 		onRemove()
@@ -108,14 +108,45 @@ func (ds *DynamicScheduler) RemoveTaskAndStream(taskID string, onRemove func()) 
 // ReorderTickets to swap the running task without marking it as Failed.
 func (ds *DynamicScheduler) RemoveTaskSilent(taskID string, onRemove func()) {
 	ds.mutex.Lock()
-	defer ds.mutex.Unlock()
-
-	if task, exists := ds.tasks[taskID]; exists {
+	task := ds.tasks[taskID]
+	delete(ds.tasks, taskID)
+	ds.mutex.Unlock()
+	if task != nil {
 		task.StopSilent()
-		delete(ds.tasks, taskID)
 	}
 	if onRemove != nil {
 		onRemove()
+	}
+}
+
+// CompleteTask removes one terminal task and then releases its associated
+// resources. It is safe to call from the task's completion callback.
+func (ds *DynamicScheduler) CompleteTask(taskID string, onRemove func()) bool {
+	ds.mutex.Lock()
+	task, exists := ds.tasks[taskID]
+	if !exists || task.GetStat() <= StatPending {
+		ds.mutex.Unlock()
+		return false
+	}
+	delete(ds.tasks, taskID)
+	ds.mutex.Unlock()
+	if onRemove != nil {
+		onRemove()
+	}
+	return true
+}
+
+// Close stops and removes every task, releasing per-task resources.
+func (ds *DynamicScheduler) Close(onRemove func(string)) {
+	ds.mutex.Lock()
+	tasks := ds.tasks
+	ds.tasks = make(map[string]ITask)
+	ds.mutex.Unlock()
+	for id, task := range tasks {
+		task.Stop()
+		if onRemove != nil {
+			onRemove(id)
+		}
 	}
 }
 

@@ -13,7 +13,10 @@ import (
 	"bilibili-ticket-golang/lib/global"
 )
 
-const maxOrderRecords = 1000
+const (
+	maxOrderRecords         = 1000
+	maxOpenedPaymentWindows = 1000
+)
 
 func (s *ClusterService) openOrderRecordPaymentWindowOnce(record domain.OrderRecord) {
 	if record.PaymentURL == "" || record.Status == domain.SubOrderFailed || record.Status == domain.SubOrderPending {
@@ -23,24 +26,29 @@ func (s *ClusterService) openOrderRecordPaymentWindowOnce(record domain.OrderRec
 	if record.OrderID != "" {
 		key = record.OrderID
 	}
-	s.paymentWindowMu.Lock()
-	if s.openedPaymentWindows[key] {
-		s.paymentWindowMu.Unlock()
+	if !s.markPaymentWindowOpened(key) {
 		return
 	}
-	s.openedPaymentWindows[key] = true
-	s.paymentWindowMu.Unlock()
 	s.openOrderRecordPaymentWindow(record)
 }
 
-func successfulSubOrderCount(subOrders []domain.SubOrderResult) int {
-	count := 0
-	for _, child := range subOrders {
-		if child.State == domain.SubOrderSucceeded {
-			count++
+func (s *ClusterService) markPaymentWindowOpened(key string) bool {
+	s.paymentWindowMu.Lock()
+	defer s.paymentWindowMu.Unlock()
+	if s.openedPaymentWindows == nil {
+		s.openedPaymentWindows = make(map[string]bool)
+	}
+	if s.openedPaymentWindows[key] {
+		return false
+	}
+	for len(s.openedPaymentWindows) >= maxOpenedPaymentWindows {
+		for oldKey := range s.openedPaymentWindows {
+			delete(s.openedPaymentWindows, oldKey)
+			break
 		}
 	}
-	return count
+	s.openedPaymentWindows[key] = true
+	return true
 }
 
 func (s *ClusterService) saveOrderRecords(intent domain.LogicalOrderIntent, result domain.ExecutionResult) ([]domain.OrderRecord, error) {

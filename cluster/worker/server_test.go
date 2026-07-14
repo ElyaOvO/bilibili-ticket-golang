@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -78,6 +79,7 @@ func startTestServer(t *testing.T, config Config, factory BackendFactory) (pb.Wo
 	return cli, func() {
 		conn.Close()
 		grpcSrv.Stop()
+		srv.Stop()
 		_ = lis.Close()
 	}
 }
@@ -236,14 +238,41 @@ func TestSuccessPersistsAndSurvivesRestart(t *testing.T) {
 		t.Fatalf("execution response missing from logs: %#v", logsResp.Entries)
 	}
 
+	// ACK releases the full runtime task, while the compact persisted result
+	// still prevents the same attempt from executing twice.
+	if _, err = cli.Ack(ctx, &pb.AckRequest{AttemptId: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	srv.mu.Lock()
+	remaining := len(srv.tasks)
+	srv.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("runtime tasks after ACK=%d, want 0", remaining)
+	}
+	idempotent, err := cli.Submit(ctx, &pb.SubmitRequest{Spec: sp})
+	if err != nil {
+		t.Fatalf("submit persisted attempt: %v", err)
+	}
+	if idempotent.Status.State != pb.AttemptState_ATTEMPT_SUCCEEDED {
+		t.Fatalf("persisted state=%v", idempotent.Status.State)
+	}
+	srv.mu.Lock()
+	remaining = len(srv.tasks)
+	srv.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("persisted submit recreated runtime task")
+	}
+
 	// Restart.
 	grpcSrv.Stop()
 	_ = conn.Close()
+	srv.Stop()
 
 	restarted, err := NewServer(config, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer restarted.Stop()
 	lis2, err := net.Listen("tcp", lis.Addr().String())
 	if err != nil {
 		t.Fatal(err)
@@ -282,6 +311,7 @@ func TestTaskLogsAreBoundedAndRedacted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(srv.Stop)
 	_ = config.Normalize()
 
 	taskSpec := workerSpec("a")
@@ -294,6 +324,90 @@ func TestTaskLogsAreBoundedAndRedacted(t *testing.T) {
 	}
 	if strings.Contains(task.logs[0].Message, "must-not-leak") {
 		t.Fatalf("credential leaked in API log: %#v", task.logs[0])
+	}
+}
+
+func TestSuccessStoreCacheIsBounded(t *testing.T) {
+	store := &SuccessStore{results: make(map[string]domain.ExecutionResult)}
+	for i := 0; i < maxCachedSuccessResults+25; i++ {
+		id := fmt.Sprintf("attempt-%d", i)
+		store.order = append(store.order, id)
+		store.results[id] = domain.ExecutionResult{AttemptID: id}
+	}
+	store.trimLocked()
+	if len(store.results) != maxCachedSuccessResults || len(store.order) != maxCachedSuccessResults {
+		t.Fatalf("cache sizes results=%d order=%d", len(store.results), len(store.order))
+	}
+	if _, exists := store.results["attempt-0"]; exists {
+		t.Fatal("oldest result was not evicted")
+	}
+}
+
+func TestServerStopIsIdempotent(t *testing.T) {
+	config := Config{Listen: "127.0.0.1:0", DataDir: t.TempDir()}
+	server, err := NewServer(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		server.Stop()
+		server.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("server lifecycle goroutine did not stop")
+	}
+}
+
+func TestServerStopCancelsAllTasks(t *testing.T) {
+	config := Config{Listen: "127.0.0.1:0", DataDir: t.TempDir()}
+	server, err := NewServer(config, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.mu.Lock()
+	for _, id := range []string{"one", "two"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		server.tasks[id] = &task{spec: domain.ExecutionSpec{AttemptID: id}, state: domain.AttemptRunning, cancel: cancel}
+		server.lifecycleWG.Add(1)
+		go func() {
+			defer server.lifecycleWG.Done()
+			<-ctx.Done()
+		}()
+	}
+	server.mu.Unlock()
+	server.Stop()
+	if !server.stopped {
+		t.Fatal("server was not marked stopped")
+	}
+}
+
+func TestTerminalTaskRetentionIsBounded(t *testing.T) {
+	now := time.Now()
+	server := &Server{tasks: make(map[string]*task), now: func() time.Time { return now }}
+	for i := 0; i < maxRetainedTerminalTasks+10; i++ {
+		id := fmt.Sprintf("attempt-%d", i)
+		finished := now.Add(-time.Duration(maxRetainedTerminalTasks+10-i) * time.Second)
+		server.tasks[id] = &task{
+			spec:   domain.ExecutionSpec{AttemptID: id},
+			state:  domain.AttemptSucceeded,
+			result: domain.ExecutionResult{AttemptID: id, State: domain.AttemptSucceeded, FinishedAt: finished},
+		}
+	}
+	server.tasks["expired"] = &task{
+		spec:   domain.ExecutionSpec{AttemptID: "expired"},
+		state:  domain.AttemptFailed,
+		result: domain.ExecutionResult{AttemptID: "expired", State: domain.AttemptFailed, FinishedAt: now.Add(-terminalTaskRetention)},
+	}
+	server.pruneTerminalTasksLocked()
+	if len(server.tasks) != maxRetainedTerminalTasks {
+		t.Fatalf("terminal tasks=%d", len(server.tasks))
+	}
+	if _, exists := server.tasks["expired"]; exists {
+		t.Fatal("expired terminal task was retained")
 	}
 }
 

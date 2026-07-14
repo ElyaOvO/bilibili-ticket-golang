@@ -41,6 +41,9 @@
     "bws.success_notify": {
         "other": "BWS Reservation Successful!\nActivity: {{.Activity}}\nDate: {{.Date}}"
     },
+    "task.notify_success": {
+        "other": "Ticket grabbed!\nProject: {{.Project}}\nScreen: {{.Screen}}\nSKU: {{.Sku}}\nBuyer: {{.Buyer}}\nUser: {{.User}}({{.UID}})\nPayment URL: {{.PaymentURL}}"
+    },
     "bws.task_started": {
         "other": "BWS task started — Activity:{{.Activity}} (ID:{{.ActivityID}}) Date:{{.Date}} TicketNo:{{.TicketNo}}"
     },

@@ -41,6 +41,9 @@
     "bws.success_notify": {
         "other": "BWS预约成功！\n活动：{{.Activity}}\n日期：{{.Date}}"
     },
+    "task.notify_success": {
+        "other": "抢票成功！\n项目：{{.Project}}\n场次：{{.Screen}}\n票种：{{.Sku}}\n购票人：{{.Buyer}}\n购票用户：{{.User}}({{.UID}})\n支付链接：{{.PaymentURL}}"
+    },
     "bws.task_started": {
         "other": "BWS任务开始 — 活动:{{.Activity}} (ID:{{.ActivityID}}) 日期:{{.Date}} 票号:{{.TicketNo}}"
     },

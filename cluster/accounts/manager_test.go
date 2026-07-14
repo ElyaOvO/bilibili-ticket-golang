@@ -42,6 +42,18 @@ func (p *provisioner) GetBuyerSensitiveData(_ context.Context, _ domain.Account,
 	return domain.Buyer{}, errors.New("buyer not found")
 }
 
+func TestAccountLocksAreReleased(t *testing.T) {
+	m := NewManager(nil, nil)
+	unlock := m.lockAccount("account")
+	unlock()
+	m.accountLocksMu.Lock()
+	remaining := len(m.accountLocks)
+	m.accountLocksMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("account locks retained=%d", remaining)
+	}
+}
+
 func (p *provisioner) DeleteBuyer(_ context.Context, _ domain.Account, buyerID int64) error {
 	return nil
 }

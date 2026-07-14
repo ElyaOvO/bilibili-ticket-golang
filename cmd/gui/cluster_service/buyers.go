@@ -18,6 +18,8 @@ import (
 	clusterstorage "bilibili-ticket-golang/cluster/storage"
 )
 
+const maxRetainedBuyerSyncBatches = 50
+
 // ProvisionBuyer creates or updates a buyer on a specific account.
 func (s *ClusterService) ProvisionBuyer(document string, confirmed bool) error {
 	var input struct {
@@ -39,7 +41,7 @@ func (s *ClusterService) StartBuyerSync(document string) (BuyerSyncBatch, error)
 	if err := json.Unmarshal([]byte(document), &req); err != nil {
 		return BuyerSyncBatch{}, err
 	}
-	return s.runBuyerSyncBatch(context.Background(), req, false)
+	return s.runBuyerSyncBatch(s.backgroundContext(), req, false)
 }
 
 func (s *ClusterService) GetBuyerSyncBatch(batchID string) (BuyerSyncBatch, error) {
@@ -125,6 +127,7 @@ func (s *ClusterService) runBuyerSyncBatch(ctx context.Context, req BuyerSyncSta
 		s.buyerSyncBatches = make(map[string]*BuyerSyncBatch)
 	}
 	s.buyerSyncBatches[batch.ID] = batch
+	s.pruneBuyerSyncBatchesLocked()
 	s.buyerSyncMu.Unlock()
 	s.appendBuyerSyncLog(batch.ID, "", "", "", BuyerSyncPending, "info", fmt.Sprintf("准备同步 %d 个购票人到 %d 个账号，共 %d 个任务", len(buyers), len(selectedAccounts), batch.Total))
 
@@ -171,7 +174,7 @@ func (s *ClusterService) executeBuyerSyncBatch(ctx context.Context, batchID stri
 		}()
 	}
 	wg.Wait()
-	_ = s.refreshResources(context.Background())
+	_ = s.refreshResources(ctx)
 	final := s.finalizeBuyerSyncBatch(batchID)
 	if final.Failed > 0 {
 		s.appendBuyerSyncLog(batchID, "", "", "", BuyerSyncFailed, "warn", fmt.Sprintf("同步完成，成功 %d，跳过 %d，失败 %d", final.Succeeded, final.Skipped, final.Failed))
@@ -297,7 +300,28 @@ func (s *ClusterService) finalizeBuyerSyncBatch(batchID string) BuyerSyncBatch {
 	}
 	batch.Running = 0
 	batch.UpdatedAt = time.Now()
+	s.pruneBuyerSyncBatchesLocked()
 	return cloneBuyerSyncBatch(batch)
+}
+
+func (s *ClusterService) pruneBuyerSyncBatchesLocked() {
+	type completedBatch struct {
+		id string
+		at time.Time
+	}
+	completed := make([]completedBatch, 0, len(s.buyerSyncBatches))
+	for id, batch := range s.buyerSyncBatches {
+		if batch != nil && (batch.State == BuyerSyncSuccess || batch.State == BuyerSyncFailed) {
+			completed = append(completed, completedBatch{id: id, at: batch.UpdatedAt})
+		}
+	}
+	if len(completed) <= maxRetainedBuyerSyncBatches {
+		return
+	}
+	sort.Slice(completed, func(i, j int) bool { return completed[i].at.Before(completed[j].at) })
+	for _, batch := range completed[:len(completed)-maxRetainedBuyerSyncBatches] {
+		delete(s.buyerSyncBatches, batch.id)
+	}
 }
 
 func cloneBuyerSyncBatch(batch *BuyerSyncBatch) BuyerSyncBatch {

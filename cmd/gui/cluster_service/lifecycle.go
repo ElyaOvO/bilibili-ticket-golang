@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"time"
 
@@ -83,10 +82,7 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 			}
 		}
 		if notify := service.notify; notify != nil {
-			message := fmt.Sprintf("购票成功：Intent %s，订单 %s", intent.ID, result.OrderID)
-			if result.Partial {
-				message = fmt.Sprintf("购票部分完成：Intent %s，已创建 %d 个子订单", intent.ID, successfulSubOrderCount(result.SubOrders))
-			}
+			message := service.ticketSuccessNotification(intent, result, records)
 			go func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -159,7 +155,26 @@ func (s *ClusterService) openPayQRWindow(intent domain.LogicalOrderIntent, resul
 func (s *ClusterService) Start(parent context.Context) error {
 	log.Printf("[cluster] starting cluster service (employer commit=%s)", global.GitCommit)
 	ctx, cancel := context.WithCancel(parent)
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+			s.mu.Lock()
+			if s.lifecycleCtx == ctx {
+				s.cancel = nil
+				s.lifecycleCtx = nil
+			}
+			s.mu.Unlock()
+		}
+	}()
+	s.mu.Lock()
+	previousCancel := s.cancel
 	s.cancel = cancel
+	s.lifecycleCtx = ctx
+	s.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
 
 	// Clean up expired manual captcha sessions every minute.
 	go func() {
@@ -367,10 +382,15 @@ func (s *ClusterService) Start(parent context.Context) error {
 		// get a burst of ticks when switching.
 		fastCh := make(chan time.Time)
 		go func() {
-			for t := range fastTicker.C {
+			for {
 				select {
-				case fastCh <- t:
-				default:
+				case <-ctx.Done():
+					return
+				case t := <-fastTicker.C:
+					select {
+					case fastCh <- t:
+					default:
+					}
 				}
 			}
 		}()
@@ -402,7 +422,18 @@ func (s *ClusterService) Start(parent context.Context) error {
 	// This prevents the frontend from immediately dispatching tasks before
 	// the gRPC servers are ready to accept connections.
 	s.waitForLocalWorkers(ctx, 5*time.Second)
+	started = true
 	return nil
+}
+
+func (s *ClusterService) backgroundContext() context.Context {
+	s.mu.RLock()
+	ctx := s.lifecycleCtx
+	s.mu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // waitForLocalWorkers polls all known local worker slots until they are
@@ -435,10 +466,27 @@ func (s *ClusterService) waitForLocalWorkers(ctx context.Context, timeout time.D
 // Close shuts down the cluster: cancels the reconciliation loop, stops
 // local workers, and closes the repository.
 func (s *ClusterService) Close() {
-	if s.cancel != nil {
-		s.cancel()
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.lifecycleCtx = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	s.cancelAllTaskGroupWaves()
+	s.deployMu.RLock()
+	deployCancels := make([]context.CancelFunc, 0, len(s.deployJobs))
+	for _, job := range s.deployJobs {
+		if job != nil && job.cancel != nil {
+			deployCancels = append(deployCancels, job.cancel)
+		}
+	}
+	s.deployMu.RUnlock()
+	for _, cancelDeploy := range deployCancels {
+		cancelDeploy()
+	}
 	_ = s.local.Stop()
+	s.client.Close()
 	_ = s.repository.Close()
 }

@@ -86,6 +86,7 @@ type LogBroker struct {
 	mu      sync.RWMutex
 	rings   map[string]*ringBuffer
 	streams map[string]chan LogEntry
+	done    map[string]chan struct{}
 	maxCap  int
 	storage *LogStorage
 }
@@ -96,6 +97,7 @@ func NewLogBroker(storage *LogStorage) *LogBroker {
 	return &LogBroker{
 		rings:   make(map[string]*ringBuffer),
 		streams: make(map[string]chan LogEntry),
+		done:    make(map[string]chan struct{}),
 		maxCap:  global.DefaultRingCapacity,
 		storage: storage,
 	}
@@ -122,7 +124,9 @@ func (lb *LogBroker) CreateStream(taskID string) chan<- LogEntry {
 	if !exists {
 		ch = make(chan LogEntry, 64)
 		lb.streams[taskID] = ch
-		go lb.forward(taskID, ch)
+		done := make(chan struct{})
+		lb.done[taskID] = done
+		go lb.forward(taskID, ch, done)
 	}
 	lb.mu.Unlock()
 	return ch
@@ -134,21 +138,30 @@ func (lb *LogBroker) CreateStream(taskID string) chan<- LogEntry {
 func (lb *LogBroker) CloseStream(taskID string) {
 	lb.mu.Lock()
 	ch, ok := lb.streams[taskID]
+	done := lb.done[taskID]
 	if ok {
 		delete(lb.streams, taskID)
+		delete(lb.done, taskID)
 	}
 	lb.mu.Unlock()
 	if ok {
-		defer func() { _ = recover() }()
-		close(ch)
+		func() {
+			defer func() { _ = recover() }()
+			close(ch)
+		}()
+	}
+	if done != nil {
+		<-done
 	}
 	lb.mu.Lock()
 	delete(lb.rings, taskID)
 	lb.mu.Unlock()
+	lb.storage.Release(taskID)
 }
 
 // forward reads from ch until it is closed, ingesting entries.
-func (lb *LogBroker) forward(taskID string, ch <-chan LogEntry) {
+func (lb *LogBroker) forward(taskID string, ch <-chan LogEntry, done chan<- struct{}) {
+	defer close(done)
 	for entry := range ch {
 		lb.ingest(taskID, entry)
 	}

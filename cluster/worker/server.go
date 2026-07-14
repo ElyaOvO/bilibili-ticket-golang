@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -132,18 +133,26 @@ type Server struct {
 	notifierGeneration uint64        // prevents an old stream from clearing a newer notifier
 	grpcServer         *grpc.Server  // set by ServeOn/ListenAndServe; nil until serving
 	captchaTester      CaptchaTester // optional; enables TestCaptcha RPC
+	stopped            bool
 
 	// Global configuration pushed by the employer via Configure RPC.
 	globalConfig   GlobalConfig
 	globalConfigMu sync.RWMutex
 
 	// Cached clock offsets (computed with TTL, reported in Health).
-	biliOffset   time.Duration
-	ntpOffset    time.Duration
-	offsetsReady bool
-	offsetsAt    time.Time
-	offsetsMu    sync.Mutex
+	biliOffset      time.Duration
+	ntpOffset       time.Duration
+	offsetsReady    bool
+	offsetsAt       time.Time
+	offsetsMu       sync.Mutex
+	lifecycleCancel context.CancelFunc
+	lifecycleWG     sync.WaitGroup
 }
+
+const (
+	maxRetainedTerminalTasks = 1000
+	terminalTaskRetention    = time.Hour
+)
 
 // GlobalConfig holds runtime configuration pushed by the employer.
 type GlobalConfig struct {
@@ -164,7 +173,8 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 			return executor.NewBilibiliBackend(spec.Credentials)
 		}
 	}
-	s := &Server{config: config, factory: factory, store: store, tasks: make(map[string]*task), now: time.Now}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	s := &Server{config: config, factory: factory, store: store, tasks: make(map[string]*task), now: time.Now, lifecycleCancel: lifecycleCancel}
 	for id, result := range store.All() {
 		if !result.State.Terminal() {
 			if !result.Partial {
@@ -178,7 +188,12 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 		}
 		s.tasks[id] = &task{spec: domain.ExecutionSpec{AttemptID: id, IntentID: result.IntentID}, specHash: result.SpecHash, state: result.State, result: result}
 	}
-	go s.reapLeases()
+	s.pruneTerminalTasksLocked()
+	s.lifecycleWG.Add(1)
+	go func() {
+		defer s.lifecycleWG.Done()
+		s.reapLeases(lifecycleCtx)
+	}()
 	return s, nil
 }
 
@@ -201,9 +216,11 @@ func (s *Server) Stop() {
 	s.mu.Lock()
 	gs := s.grpcServer
 	s.grpcServer = nil
-	// Cancel the currently active task if any.
-	if s.active != "" {
-		if t := s.tasks[s.active]; t != nil && t.cancel != nil {
+	s.stopped = true
+	// Cancel every running task. BWS tasks may coexist, so s.active alone is
+	// not sufficient to shut the worker down.
+	for _, t := range s.tasks {
+		if t != nil && !t.state.Terminal() && t.cancel != nil {
 			t.cancel()
 		}
 	}
@@ -211,6 +228,10 @@ func (s *Server) Stop() {
 	if gs != nil {
 		gs.Stop()
 	}
+	if s.lifecycleCancel != nil {
+		s.lifecycleCancel()
+	}
+	s.lifecycleWG.Wait()
 }
 
 func (s *Server) ListenAndServe() error {
@@ -332,12 +353,31 @@ func (ws *workerService) Submit(_ context.Context, req *pb.SubmitRequest) (*pb.S
 	hash := spec.Hash()
 
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil, status.Error(codes.Unavailable, "worker is stopped")
+	}
 	if existing, ok := s.tasks[spec.AttemptID]; ok {
 		if existing.specHash != hash {
 			s.mu.Unlock()
 			return nil, status.Error(codes.AlreadyExists, "attemptId already exists with a different spec")
 		}
 		resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(existing))}
+		s.mu.Unlock()
+		return resp, nil
+	}
+	if persisted, ok := s.store.Get(spec.AttemptID); ok {
+		if persisted.SpecHash != hash {
+			s.mu.Unlock()
+			return nil, status.Error(codes.AlreadyExists, "attemptId already exists with a different spec")
+		}
+		persistedTask := &task{
+			spec:     domain.ExecutionSpec{AttemptID: spec.AttemptID, IntentID: persisted.IntentID},
+			specHash: persisted.SpecHash,
+			state:    persisted.State,
+			result:   persisted,
+		}
+		resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(persistedTask))}
 		s.mu.Unlock()
 		return resp, nil
 	}
@@ -351,9 +391,13 @@ func (ws *workerService) Submit(_ context.Context, req *pb.SubmitRequest) (*pb.S
 	t := &task{spec: spec, specHash: hash, state: domain.AttemptWaiting, leaseUntil: s.now().Add(s.config.LeaseDuration), cancel: cancel}
 	s.tasks[spec.AttemptID], s.active = t, spec.AttemptID
 	resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(t))}
+	s.lifecycleWG.Add(1)
 	s.mu.Unlock()
 	s.logTask(t, "accepted", "task accepted for intent "+spec.IntentID, 0, false)
-	go s.run(ctx, t)
+	go func() {
+		defer s.lifecycleWG.Done()
+		s.run(ctx, t)
+	}()
 	return resp, nil
 }
 
@@ -373,6 +417,9 @@ func (ws *workerService) Status(_ context.Context, req *pb.StatusRequest) (*pb.S
 		t.leaseUntil = s.now().Add(s.config.LeaseDuration)
 	}
 	resp := &pb.StatusResponse{Status: statusToProto(s.snapshot(t))}
+	if t.state.Terminal() {
+		t.result.Credentials = domain.Credentials{}
+	}
 	s.mu.Unlock()
 	return resp, nil
 }
@@ -435,9 +482,7 @@ func (ws *workerService) Ack(_ context.Context, req *pb.AckRequest) (*pb.AckResp
 		s.mu.Unlock()
 		return nil, status.Error(codes.FailedPrecondition, "attempt is not terminal")
 	}
-	if !t.result.Success {
-		delete(s.tasks, id)
-	}
+	delete(s.tasks, id)
 	s.mu.Unlock()
 	return &pb.AckResponse{}, nil
 }
@@ -1421,6 +1466,8 @@ func (s *Server) runBWS(ctx context.Context, t *task) {
 func (s *Server) complete(t *task, result domain.ExecutionResult) {
 	s.mu.Lock()
 	t.result, t.state = result, result.State
+	t.spec = domain.ExecutionSpec{AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID}
+	t.cancel = nil
 	if s.active == t.spec.AttemptID {
 		s.active = ""
 	}
@@ -1438,6 +1485,9 @@ func (s *Server) complete(t *task, result domain.ExecutionResult) {
 	s.mu.Unlock()
 	if notify != nil {
 		notify(t)
+		s.mu.Lock()
+		t.result.Credentials = domain.Credentials{}
+		s.mu.Unlock()
 	}
 }
 
@@ -1467,16 +1517,60 @@ func (s *Server) logTask(t *task, stage, message string, code int, retryable boo
 	_ = WriteRedactedLog(s.config.DataDir, fmt.Sprintf("%s attempt=%s stage=%s code=%d retryable=%t message=%s", entry.Time.Format(time.RFC3339Nano), t.spec.AttemptID, stage, code, retryable, message))
 }
 
-func (s *Server) reapLeases() {
+func (s *Server) reapLeases(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.mu.Lock()
-		if t := s.tasks[s.active]; t != nil && !t.state.Terminal() && !t.leaseUntil.After(s.now()) {
-			t.state = domain.AttemptStopping
-			t.cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			if t := s.tasks[s.active]; t != nil && !t.state.Terminal() && !t.leaseUntil.After(s.now()) {
+				t.state = domain.AttemptStopping
+				t.cancel()
+			}
+			s.pruneTerminalTasksLocked()
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
+	}
+}
+
+func (s *Server) pruneTerminalTasksLocked() {
+	now := s.now()
+	type terminalTask struct {
+		id       string
+		finished time.Time
+	}
+	terminal := make([]terminalTask, 0, len(s.tasks))
+	for id, task := range s.tasks {
+		if task == nil || !task.state.Terminal() {
+			continue
+		}
+		finished := task.result.FinishedAt
+		if !finished.IsZero() && now.Sub(finished) >= terminalTaskRetention {
+			delete(s.tasks, id)
+			continue
+		}
+		terminal = append(terminal, terminalTask{id: id, finished: finished})
+	}
+	if len(terminal) <= maxRetainedTerminalTasks {
+		return
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		if terminal[i].finished.IsZero() && terminal[j].finished.IsZero() {
+			return terminal[i].id < terminal[j].id
+		}
+		if terminal[i].finished.IsZero() {
+			return true
+		}
+		if terminal[j].finished.IsZero() {
+			return false
+		}
+		return terminal[i].finished.Before(terminal[j].finished)
+	})
+	for _, task := range terminal[:len(terminal)-maxRetainedTerminalTasks] {
+		delete(s.tasks, task.id)
 	}
 }
 

@@ -39,38 +39,15 @@ func (ls *LogStorage) filePath(taskID string) string {
 	return filepath.Join(ls.dirPath, taskID+".log")
 }
 
-// Load reads all persisted .log files from the logs/ directory.
-// Each file is truncated to the last maxLinesOnLoad lines (oldest entries discarded).
-// Missing directory is not an error (first launch).
+// Load prepares the log directory without loading historical task logs into
+// memory. History is read from disk on demand by GetEntries.
 func (ls *LogStorage) Load() error {
 	if err := os.MkdirAll(ls.dirPath, 0755); err != nil {
 		return err
 	}
-
-	dirEntries, err := os.ReadDir(ls.dirPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
 	ls.mu.Lock()
-	defer ls.mu.Unlock()
-
-	for _, de := range dirEntries {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".log") {
-			continue
-		}
-		taskID := strings.TrimSuffix(de.Name(), ".log")
-		logs, err := ls.readAndTruncateLocked(taskID)
-		if err != nil {
-			continue // skip corrupted files
-		}
-		if len(logs) > 0 {
-			ls.entries[taskID] = logs
-		}
-	}
+	ls.entries = make(map[string][]LogEntry)
+	ls.mu.Unlock()
 	return nil
 }
 
@@ -176,25 +153,47 @@ func (ls *LogStorage) Append(taskID string, entry LogEntry) {
 // GetEntries returns all persisted log entries for a task (oldest first).
 func (ls *LogStorage) GetEntries(taskID string) []LogEntry {
 	ls.mu.RLock()
-	defer ls.mu.RUnlock()
 	entries := ls.entries[taskID]
-	if entries == nil {
-		return nil
+	if entries != nil {
+		out := make([]LogEntry, len(entries))
+		copy(out, entries)
+		ls.mu.RUnlock()
+		return out
 	}
-	out := make([]LogEntry, len(entries))
-	copy(out, entries)
-	return out
+	ls.mu.RUnlock()
+
+	ls.mu.Lock()
+	entries, _ = ls.readAndTruncateLocked(taskID)
+	ls.mu.Unlock()
+	return append([]LogEntry(nil), entries...)
 }
 
 // GetAllTaskIDs returns the IDs of all tasks that have persisted logs.
 func (ls *LogStorage) GetAllTaskIDs() []string {
 	ls.mu.RLock()
-	defer ls.mu.RUnlock()
-	ids := make([]string, 0, len(ls.entries))
+	seen := make(map[string]bool, len(ls.entries))
 	for id := range ls.entries {
+		seen[id] = true
+	}
+	ls.mu.RUnlock()
+	dirEntries, _ := os.ReadDir(ls.dirPath)
+	for _, entry := range dirEntries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".log") {
+			seen[strings.TrimSuffix(entry.Name(), ".log")] = true
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// Release drops the in-memory copy while preserving the on-disk history.
+func (ls *LogStorage) Release(taskID string) {
+	ls.mu.Lock()
+	delete(ls.entries, taskID)
+	ls.mu.Unlock()
 }
 
 // Clear removes all persisted logs for a task (memory + disk).
