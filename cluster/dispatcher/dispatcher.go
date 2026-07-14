@@ -72,6 +72,9 @@ type Dispatcher struct {
 	now                 func() time.Time
 	next                uint64
 	onSuccess           func(domain.LogicalOrderIntent, domain.ExecutionResult)
+	onPartial           func(domain.LogicalOrderIntent, domain.ExecutionResult)
+	onProgress          func(domain.LogicalOrderIntent, domain.ExecutionResult)
+	reportedSubOrders   map[string]bool
 	stoppedPhases       map[domain.Phase]bool
 	workerReservations  map[string]string // workerID → taskGroupID
 	workerRoles         map[string]domain.ResourceRole
@@ -85,8 +88,45 @@ func (d *Dispatcher) SetSuccessHandler(handler func(domain.LogicalOrderIntent, d
 	d.onSuccess = handler
 }
 
+func (d *Dispatcher) SetPartialHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onPartial = handler
+}
+
+func (d *Dispatcher) SetProgressHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onProgress = handler
+}
+
 func New(client WorkerClient, repository Repository, resolver MappingResolver) *Dispatcher {
-	return &Dispatcher{client: client, repository: repository, resolver: resolver, plans: make(map[string]*IntentPlan), attempts: make(map[string]*attempt), accounts: make(map[string]domain.Account), workers: make(map[string]domain.WorkerNode), accountBusy: make(map[string]string), workerBusy: make(map[string]string), accountReservations: make(map[string]string), failedWorkers: make(map[string]time.Time), quarantinedAccounts: make(map[string]time.Time), workerCooldown: make(map[string]time.Time), stoppedPhases: make(map[domain.Phase]bool), workerReservations: make(map[string]string), workerRoles: make(map[string]domain.ResourceRole), now: time.Now}
+	return &Dispatcher{client: client, repository: repository, resolver: resolver, plans: make(map[string]*IntentPlan), attempts: make(map[string]*attempt), accounts: make(map[string]domain.Account), workers: make(map[string]domain.WorkerNode), accountBusy: make(map[string]string), workerBusy: make(map[string]string), accountReservations: make(map[string]string), failedWorkers: make(map[string]time.Time), quarantinedAccounts: make(map[string]time.Time), workerCooldown: make(map[string]time.Time), stoppedPhases: make(map[domain.Phase]bool), workerReservations: make(map[string]string), workerRoles: make(map[string]domain.ResourceRole), reportedSubOrders: make(map[string]bool), now: time.Now}
+}
+
+func (d *Dispatcher) reportNewSubOrders(plan *IntentPlan, result domain.ExecutionResult) {
+	if d.onProgress == nil || plan == nil {
+		return
+	}
+	newChildren := make([]domain.SubOrderResult, 0)
+	for _, child := range result.SubOrders {
+		if child.State != domain.SubOrderSucceeded || child.OrderID == "" {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d:%s", result.AttemptID, child.BuyerIndex, child.OrderID)
+		if d.reportedSubOrders[key] {
+			continue
+		}
+		d.reportedSubOrders[key] = true
+		newChildren = append(newChildren, child)
+	}
+	if len(newChildren) == 0 {
+		return
+	}
+	progress := result
+	progress.Partial = true
+	progress.SubOrders = newChildren
+	d.onProgress(plan.Intent, progress)
 }
 
 func uniqueNonEmpty(values []string) []string {
@@ -751,6 +791,7 @@ func (d *Dispatcher) poll(ctx context.Context) error {
 		if d.repository != nil {
 			_ = d.repository.PutAttempt(ctx, current.value)
 		}
+		d.reportNewSubOrders(d.plans[current.planID], status.Result)
 		// Track attempt-level cooldown for UI countdown display.
 		if status.State == domain.AttemptCooldown {
 			if current.cooldownUntil.IsZero() {
@@ -784,6 +825,9 @@ func (d *Dispatcher) poll(ctx context.Context) error {
 			}
 			continue
 		}
+		if status.Result.Partial && d.onPartial != nil {
+			d.onPartial(d.plans[current.planID].Intent, status.Result)
+		}
 		d.applyFailure(ctx, current, status.Result)
 		if d.repository != nil {
 			_ = d.repository.PutAttempt(ctx, current.value)
@@ -794,23 +838,30 @@ func (d *Dispatcher) poll(ctx context.Context) error {
 
 func (d *Dispatcher) win(ctx context.Context, winner *attempt, result domain.ExecutionResult) error {
 	plan := d.plans[winner.planID]
-	if plan.Intent.Succeeded {
-		log.Printf("[dispatcher] win SKIP: intent %s already succeeded", plan.Intent.ID)
-		return nil
+	firstSuccess := !plan.Intent.Succeeded
+	log.Printf("[dispatcher] win: intent=%s attempt=%s orderID=%s paymentURL=%q firstSuccess=%v onSuccess=%v",
+		plan.Intent.ID, result.AttemptID, result.OrderID, result.PaymentURL, firstSuccess, d.onSuccess != nil)
+	if firstSuccess {
+		plan.Intent.Succeeded, plan.Intent.Terminal = true, true
 	}
-	log.Printf("[dispatcher] win: intent=%s orderID=%s paymentURL=%q onSuccess=%v",
-		plan.Intent.ID, result.OrderID, result.PaymentURL, d.onSuccess != nil)
-	plan.Intent.Succeeded, plan.Intent.Terminal = true, true
-	// Call onSuccess BEFORE MarkIntentSucceeded so that the payment
-	// window opens even if the database write fails.
+	// Every successful attempt can represent a distinct order. Sibling
+	// replicas may both finish creating an order before the first one can be
+	// stopped, so report and persist every success. Only the logical intent
+	// win and conflict cancellation below are one-shot operations.
+	//
+	// Invoke the handler before MarkIntentSucceeded so the employer can
+	// durably record the order even if updating the intent later fails.
 	if d.onSuccess != nil {
-		go d.onSuccess(plan.Intent, result)
+		d.onSuccess(plan.Intent, result)
 	}
 	if d.repository != nil {
 		if err := d.repository.MarkIntentSucceeded(ctx, plan.Intent, result); err != nil {
 			log.Printf("[dispatcher] win: MarkIntentSucceeded failed for intent=%s: %v", plan.Intent.ID, err)
 			return err
 		}
+	}
+	if !firstSuccess {
+		return nil
 	}
 	for _, other := range d.plans {
 		if other.Intent.ID == plan.Intent.ID || other.Intent.Succeeded || other.Intent.Terminal {
@@ -855,6 +906,16 @@ func (d *Dispatcher) win(ctx context.Context, winner *attempt, result domain.Exe
 }
 
 func (d *Dispatcher) applyFailure(ctx context.Context, current *attempt, result domain.ExecutionResult) {
+	if result.Partial {
+		// A replacement attempt would resubmit children that already have real
+		// orders. Stop automatic dispatch and require an explicit user decision
+		// based on the persisted child-order states.
+		plan := d.plans[current.planID]
+		plan.Intent.Terminal, plan.Intent.FailureReason = true, result.Reason
+		if d.repository != nil {
+			_ = d.repository.PutIntent(ctx, plan.Intent)
+		}
+	}
 	if result.Reason == domain.FailureUnrecoverable {
 		plan := d.plans[current.planID]
 		plan.Intent.Terminal, plan.Intent.FailureReason = true, result.Reason
@@ -969,6 +1030,7 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	if d.repository != nil {
 		_ = d.repository.PutAttempt(context.Background(), attempt.value)
 	}
+	d.reportNewSubOrders(d.plans[attempt.planID], result)
 
 	if !result.State.Terminal() {
 		return result
@@ -992,6 +1054,9 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	if result.Success {
 		_ = d.win(context.Background(), attempt, result)
 	} else {
+		if result.Partial && d.onPartial != nil {
+			d.onPartial(d.plans[attempt.planID].Intent, result)
+		}
 		d.applyFailure(context.Background(), attempt, result)
 		if d.repository != nil {
 			_ = d.repository.PutAttempt(context.Background(), attempt.value)

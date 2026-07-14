@@ -74,6 +74,7 @@ func (m *LocalWorkerManager) AddWorker(ctx context.Context, client *WorkerClient
 
 	// If already running under this ID, stop it first.
 	if slot := m.slots[id]; slot != nil && slot.server != nil {
+		slot.server.Stop()
 		if slot.listener != nil {
 			slot.listener.Close()
 		}
@@ -100,6 +101,7 @@ func (m *LocalWorkerManager) StartWorker(ctx context.Context, client *WorkerClie
 		return domain.WorkerNode{}, fmt.Errorf("worker %q not added yet", workerID)
 	}
 	if slot.server != nil {
+		slot.server.Stop()
 		if slot.listener != nil {
 			slot.listener.Close()
 		}
@@ -172,8 +174,13 @@ func (m *LocalWorkerManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, slot := range m.slots {
-		if slot != nil && slot.listener != nil {
-			slot.listener.Close()
+		if slot != nil {
+			if slot.server != nil {
+				slot.server.Stop()
+			}
+			if slot.listener != nil {
+				slot.listener.Close()
+			}
 		}
 		m.slots[id] = nil
 	}

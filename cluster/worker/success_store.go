@@ -16,7 +16,10 @@ type SuccessStore struct {
 	mu      sync.Mutex
 	path    string
 	results map[string]domain.ExecutionResult
+	order   []string
 }
+
+const maxCachedSuccessResults = 10000
 
 func OpenSuccessStore(path string) (*SuccessStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -34,8 +37,12 @@ func OpenSuccessStore(path string) (*SuccessStore, error) {
 		line, readErr := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			var result domain.ExecutionResult
-			if json.Unmarshal(line, &result) == nil && result.Success {
+			if json.Unmarshal(line, &result) == nil && result.AttemptID != "" {
+				if _, exists := s.results[result.AttemptID]; !exists {
+					s.order = append(s.order, result.AttemptID)
+				}
 				s.results[result.AttemptID] = result
+				s.trimLocked()
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
@@ -51,9 +58,6 @@ func OpenSuccessStore(path string) (*SuccessStore, error) {
 func (s *SuccessStore) Append(result domain.ExecutionResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.results[result.AttemptID]; ok {
-		return nil
-	}
 	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -72,9 +76,21 @@ func (s *SuccessStore) Append(result domain.ExecutionResult) error {
 		err = closeErr
 	}
 	if err == nil {
+		if _, exists := s.results[result.AttemptID]; !exists {
+			s.order = append(s.order, result.AttemptID)
+		}
 		s.results[result.AttemptID] = persisted
+		s.trimLocked()
 	}
 	return err
+}
+
+func (s *SuccessStore) trimLocked() {
+	for len(s.order) > maxCachedSuccessResults {
+		id := s.order[0]
+		s.order = s.order[1:]
+		delete(s.results, id)
+	}
 }
 
 func (s *SuccessStore) All() map[string]domain.ExecutionResult {
@@ -85,4 +101,11 @@ func (s *SuccessStore) All() map[string]domain.ExecutionResult {
 		out[k] = v
 	}
 	return out
+}
+
+func (s *SuccessStore) Get(attemptID string) (domain.ExecutionResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result, ok := s.results[attemptID]
+	return result, ok
 }

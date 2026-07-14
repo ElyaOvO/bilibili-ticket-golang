@@ -58,9 +58,10 @@ func (c *client) Stop(ctx context.Context, _ domain.WorkerNode, id string) error
 }
 
 type repo struct {
-	intents  []domain.LogicalOrderIntent
-	attempts []domain.ExecutionAttempt
-	occupied bool
+	intents       []domain.LogicalOrderIntent
+	attempts      []domain.ExecutionAttempt
+	successResult []domain.ExecutionResult
+	occupied      bool
 }
 
 func (r *repo) PutAttempt(_ context.Context, attempt domain.ExecutionAttempt) error {
@@ -72,7 +73,8 @@ func (r *repo) PutIntent(_ context.Context, intent domain.LogicalOrderIntent) er
 	return nil
 }
 func (r *repo) PutAccount(context.Context, domain.Account, *int64) error { return nil }
-func (r *repo) MarkIntentSucceeded(context.Context, domain.LogicalOrderIntent, domain.ExecutionResult) error {
+func (r *repo) MarkIntentSucceeded(_ context.Context, _ domain.LogicalOrderIntent, result domain.ExecutionResult) error {
+	r.successResult = append(r.successResult, result)
 	return nil
 }
 func (r *repo) BuyerDayOccupied(context.Context, []domain.BuyerDayKey) (bool, error) {
@@ -102,6 +104,17 @@ func TestRemoveTerminalAttemptsKeepsNonTerminalAttempts(t *testing.T) {
 	}
 	if d.accountBusy["a2"] != "running" || d.workerBusy["w2"] != "running" {
 		t.Fatalf("non-terminal busy markers changed: accounts=%#v workers=%#v", d.accountBusy, d.workerBusy)
+	}
+}
+
+func TestPartialResultTerminatesIntentToPreventDuplicateReplacement(t *testing.T) {
+	r := &repo{}
+	d := New(&client{}, r, nil)
+	d.plans["intent"] = &IntentPlan{Intent: domain.LogicalOrderIntent{ID: "intent"}}
+	current := &attempt{planID: "intent", value: domain.ExecutionAttempt{ID: "attempt"}}
+	d.applyFailure(context.Background(), current, domain.ExecutionResult{Partial: true, Reason: domain.FailureDeadline})
+	if !d.plans["intent"].Intent.Terminal || len(r.intents) != 1 {
+		t.Fatalf("partial result did not terminate intent: %#v", d.plans["intent"].Intent)
 	}
 }
 
@@ -141,6 +154,40 @@ func TestProcessCompletedTaskPreservesWinningAttemptMessage(t *testing.T) {
 	result := d.ProcessCompletedTask("w", domain.ExecutionResult{AttemptID: "a", IntentID: "i", State: domain.AttemptStopped, Reason: domain.FailureStopped, Message: "context canceled"})
 	if result.Message != "cancelled by winning attempt winner" {
 		t.Fatalf("message was not preserved: %#v", result)
+	}
+}
+
+func TestEverySuccessfulReplicaIsReportedAndPersisted(t *testing.T) {
+	r := &repo{}
+	d := New(&client{}, r, nil)
+	intent := dispatchIntent("i", "m", 2, "buyer")
+	d.Add(IntentPlan{Macro: dispatchMacro("m", 1), Intent: intent})
+	d.attempts["first"] = &attempt{planID: intent.ID, value: domain.ExecutionAttempt{
+		ID: "first", IntentID: intent.ID, AccountID: "a1", WorkerID: "w1", State: domain.AttemptRunning,
+	}}
+	d.attempts["second"] = &attempt{planID: intent.ID, value: domain.ExecutionAttempt{
+		ID: "second", IntentID: intent.ID, AccountID: "a2", WorkerID: "w2", State: domain.AttemptRunning,
+	}}
+
+	var reported []domain.ExecutionResult
+	d.SetSuccessHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) {
+		reported = append(reported, result)
+	})
+
+	d.ProcessCompletedTask("w1", domain.ExecutionResult{
+		AttemptID: "first", IntentID: intent.ID, State: domain.AttemptSucceeded, Success: true, OrderID: "order-1",
+	})
+	// The first winner asks the second replica to stop, but the remote order
+	// may already have been created by the time that stop reaches the worker.
+	d.ProcessCompletedTask("w2", domain.ExecutionResult{
+		AttemptID: "second", IntentID: intent.ID, State: domain.AttemptSucceeded, Success: true, OrderID: "order-2",
+	})
+
+	if len(reported) != 2 || reported[0].OrderID != "order-1" || reported[1].OrderID != "order-2" {
+		t.Fatalf("successful replica orders were not all reported: %#v", reported)
+	}
+	if len(r.successResult) != 2 || r.successResult[0].OrderID != "order-1" || r.successResult[1].OrderID != "order-2" {
+		t.Fatalf("successful replica results were not all persisted: %#v", r.successResult)
 	}
 }
 
@@ -676,5 +723,36 @@ func TestWinnerTerminalsAllConflictingIntents(t *testing.T) {
 	}
 	if len(r.intents) != 1 || r.intents[0].ID != "low-i" || !r.intents[0].Terminal {
 		t.Fatalf("terminal conflict intent was not persisted: %#v", r.intents)
+	}
+}
+
+func TestReportNewSubOrdersOnlyEmitsEachSuccessfulChildOnce(t *testing.T) {
+	d := New(nil, nil, nil)
+	plan := &IntentPlan{Intent: domain.LogicalOrderIntent{ID: "intent-1"}}
+	var updates []domain.ExecutionResult
+	d.SetProgressHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) {
+		updates = append(updates, result)
+	})
+
+	result := domain.ExecutionResult{
+		AttemptID: "attempt-1",
+		SubOrders: []domain.SubOrderResult{
+			{BuyerIndex: 0, OrderID: "order-1", State: domain.SubOrderSucceeded},
+			{BuyerIndex: 1, State: domain.SubOrderPending},
+		},
+	}
+	d.reportNewSubOrders(plan, result)
+	d.reportNewSubOrders(plan, result)
+	if len(updates) != 1 || len(updates[0].SubOrders) != 1 || updates[0].SubOrders[0].OrderID != "order-1" {
+		t.Fatalf("expected one deduplicated progress update, got %#v", updates)
+	}
+	if !updates[0].Partial {
+		t.Fatal("progress update must be marked partial")
+	}
+
+	result.SubOrders[1] = domain.SubOrderResult{BuyerIndex: 1, OrderID: "order-2", State: domain.SubOrderSucceeded}
+	d.reportNewSubOrders(plan, result)
+	if len(updates) != 2 || len(updates[1].SubOrders) != 1 || updates[1].SubOrders[0].OrderID != "order-2" {
+		t.Fatalf("expected only the newly completed child, got %#v", updates)
 	}
 }

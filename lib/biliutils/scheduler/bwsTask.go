@@ -1,9 +1,9 @@
 package scheduler
 
 import (
-	"bilibili-ticket-golang/lib/biliutils"
 	"bilibili-ticket-golang/cmd/gui/i18n"
 	"bilibili-ticket-golang/cmd/gui/store/configuration"
+	"bilibili-ticket-golang/lib/biliutils"
 	"context"
 	"fmt"
 	"sync"
@@ -237,6 +237,7 @@ func (t *BWSTask) sendLog(level LogLevel, message string) {
 	if t.logCh == nil {
 		return
 	}
+	defer func() { _ = recover() }()
 	entry := LogEntry{
 		TaskID:    t.ID,
 		Level:     level,

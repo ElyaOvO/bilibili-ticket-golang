@@ -46,11 +46,17 @@ type Manager struct {
 	repository      Repository
 	provisioner     Provisioner
 	syncConcurrency int
-	accountLocks    sync.Map // accountID -> *sync.Mutex
+	accountLocksMu  sync.Mutex
+	accountLocks    map[string]*accountLock
+}
+
+type accountLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func NewManager(repository Repository, provisioner Provisioner) *Manager {
-	return &Manager{repository: repository, provisioner: provisioner, syncConcurrency: 1}
+	return &Manager{repository: repository, provisioner: provisioner, syncConcurrency: 1, accountLocks: make(map[string]*accountLock)}
 }
 
 // SetSyncConcurrency sets the maximum number of accounts to sync buyers for
@@ -737,10 +743,25 @@ func (m *Manager) EnsureBuyer(ctx context.Context, accountID string, buyer domai
 }
 
 func (m *Manager) lockAccount(accountID string) func() {
-	value, _ := m.accountLocks.LoadOrStore(accountID, &sync.Mutex{})
-	mu := value.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	m.accountLocksMu.Lock()
+	lock := m.accountLocks[accountID]
+	if lock == nil {
+		lock = &accountLock{}
+		m.accountLocks[accountID] = lock
+	}
+	lock.refs++
+	m.accountLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		m.accountLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 && m.accountLocks[accountID] == lock {
+			delete(m.accountLocks, accountID)
+		}
+		m.accountLocksMu.Unlock()
+	}
 }
 
 var ErrConfirmationRequired = errors.New("explicit confirmation is required to create buyer")

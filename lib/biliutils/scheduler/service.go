@@ -149,6 +149,9 @@ func (svc *SchedulerService) AddBWSTask(hash string) error {
 
 	task, err := NewBWSTask(svc.client, *entry, notifyFn, logCh, func(stat RunningStat, userStopped bool) {
 		svc.bwsData.UpdateEntryStat(hash, int(stat))
+		svc.scheduler.CompleteTask(hash, func() {
+			svc.logBroker.CloseStream(hash)
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("create BWS task: %w", err)
@@ -160,6 +163,13 @@ func (svc *SchedulerService) AddBWSTask(hash string) error {
 		return fmt.Errorf("BWS task already exists")
 	}
 	return nil
+}
+
+// Close stops all scheduled work and releases its log forwarding streams.
+func (svc *SchedulerService) Close() {
+	svc.scheduler.Close(func(taskID string) {
+		svc.logBroker.CloseStream(taskID)
+	})
 }
 
 // RemoveBWSEntry removes a BWS entry from storage and its associated

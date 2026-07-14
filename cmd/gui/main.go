@@ -158,6 +158,7 @@ func main() {
 	app := NewAppWithClientAndStore(c, store)
 
 	defer func() {
+		schedSvc.Close()
 		clusterSvc.Close()
 		c.PersistCookies()
 		logBroker.FlushLogs()

@@ -42,6 +42,7 @@ type AccountLoginPoll struct {
 	Code      int    `json:"code"`
 	Message   string `json:"message"`
 	AccountID string `json:"accountId,omitempty"`
+	Warning   string `json:"warning,omitempty"`
 }
 
 // AccountLoginResult is returned after a non-QR login is persisted.
@@ -55,6 +56,7 @@ type AccountLoginResult struct {
 	NeedSafecenterVerify     bool   `json:"needSafecenterVerify,omitempty"`
 	SafecenterSMSSent        bool   `json:"safecenterSmsSent,omitempty"`
 	SafecenterCaptchaSession string `json:"safecenterCaptchaSession,omitempty"`
+	Warning                  string `json:"warning,omitempty"`
 }
 
 // LoginCaptchaPrepareResult is returned by PrepareLoginCaptcha.
@@ -123,6 +125,7 @@ func (s *ClusterService) PollAccountLogin(sessionID string) (AccountLoginPoll, e
 		return result, nil
 	}
 	session.Client.SetRefreshToken(state.RefreshToken)
+
 	saved, err := s.persistLoggedInAccount(session.Client, session.Jar, session.Name, "QR login")
 	if err != nil {
 		return result, err
@@ -131,6 +134,7 @@ func (s *ClusterService) PollAccountLogin(sessionID string) (AccountLoginPoll, e
 	delete(s.loginSessions, sessionID)
 	s.mu.Unlock()
 	result.AccountID = saved.AccountID
+	result.Warning = saved.Warning
 	return result, nil
 }
 
@@ -554,9 +558,32 @@ func (s *ClusterService) persistLoggedInAccount(client *biliutils.BiliClient, ja
 	if err := s.repository.PutAccount(ctx, account, nil); err != nil {
 		return AccountLoginResult{}, err
 	}
+
+	// Gaia reporting must only run after the login session has been verified
+	// above and the account has been persisted successfully.
+	reportCtx, cancelReport := context.WithTimeout(context.Background(), 30*time.Second)
+	reportErr := client.ReportGaiaAfterLogin(reportCtx, api.GaiaPostLoginReportOptions{
+		// SPM update at 26-07-14.
+		ExClimbWuzhi: api.GaiaFingerprintOptions{
+			SPMPrefix: "111.121",
+			PageURL:   "https://www.bilibili.com/index.html",
+		},
+		ExClimbCongLing: api.GaiaSecureFingerprintOptions{
+			CollectAPI: "spontaneous",
+			PageURL:    "https://www.bilibili.com/index.html",
+			SPMID:      "333.1007",
+		},
+	})
+	cancelReport()
+	var warning string
+	if reportErr != nil {
+		warning = reportErr.Error()
+		log.Printf("[cluster] %s Gaia post-login report failed for persisted account %s: %v", source, accountID, reportErr)
+	}
+
 	_, _ = s.accounts.SyncBuyers(context.Background(), accountID)
 	_ = s.refreshResources(context.Background())
-	return AccountLoginResult{AccountID: accountID, Name: account.Name}, nil
+	return AccountLoginResult{AccountID: accountID, Name: account.Name, Warning: warning}, nil
 }
 
 func parsePhoneForLogin(phone string) int64 {

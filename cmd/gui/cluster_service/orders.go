@@ -13,17 +13,84 @@ import (
 	"bilibili-ticket-golang/lib/global"
 )
 
-const maxOrderRecords = 1000
+const (
+	maxOrderRecords         = 1000
+	maxOpenedPaymentWindows = 1000
+)
+
+func (s *ClusterService) openOrderRecordPaymentWindowOnce(record domain.OrderRecord) {
+	if record.PaymentURL == "" || record.Status == domain.SubOrderFailed || record.Status == domain.SubOrderPending {
+		return
+	}
+	key := record.ID
+	if record.OrderID != "" {
+		key = record.OrderID
+	}
+	if !s.markPaymentWindowOpened(key) {
+		return
+	}
+	s.openOrderRecordPaymentWindow(record)
+}
+
+func (s *ClusterService) markPaymentWindowOpened(key string) bool {
+	s.paymentWindowMu.Lock()
+	defer s.paymentWindowMu.Unlock()
+	if s.openedPaymentWindows == nil {
+		s.openedPaymentWindows = make(map[string]bool)
+	}
+	if s.openedPaymentWindows[key] {
+		return false
+	}
+	for len(s.openedPaymentWindows) >= maxOpenedPaymentWindows {
+		for oldKey := range s.openedPaymentWindows {
+			delete(s.openedPaymentWindows, oldKey)
+			break
+		}
+	}
+	s.openedPaymentWindows[key] = true
+	return true
+}
+
+func (s *ClusterService) saveOrderRecords(intent domain.LogicalOrderIntent, result domain.ExecutionResult) ([]domain.OrderRecord, error) {
+	if len(result.SubOrders) == 0 {
+		record, err := s.saveOrderRecord(intent, result)
+		if err != nil {
+			return nil, err
+		}
+		return []domain.OrderRecord{record}, nil
+	}
+	records := make([]domain.OrderRecord, 0, len(result.SubOrders))
+	for _, child := range result.SubOrders {
+		childResult := result
+		childResult.OrderID = child.OrderID
+		childResult.PaymentURL = child.PaymentURL
+		childResult.PaymentExpire = child.PaymentExpire
+		childResult.OrderTime = child.OrderTime
+		childResult.SubOrders = []domain.SubOrderResult{child}
+		record, err := s.saveOrderRecord(intent, childResult)
+		if err != nil {
+			return records, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
 
 func (s *ClusterService) saveOrderRecord(intent domain.LogicalOrderIntent, result domain.ExecutionResult) (domain.OrderRecord, error) {
-	if result.OrderID == "" && result.PaymentURL == "" {
+	var child *domain.SubOrderResult
+	if len(result.SubOrders) == 1 {
+		child = &result.SubOrders[0]
+	}
+	if result.OrderID == "" && result.PaymentURL == "" && child == nil {
 		return domain.OrderRecord{}, fmt.Errorf("order result has neither order id nor payment url")
 	}
 	recordID := result.AttemptID
 	if recordID == "" {
 		recordID = intent.ID
 	}
-	if result.OrderID != "" {
+	if child != nil {
+		recordID += fmt.Sprintf(":sub:%d", child.BuyerIndex)
+	} else if result.OrderID != "" {
 		recordID += ":" + result.OrderID
 	}
 	record := domain.OrderRecord{
@@ -37,9 +104,18 @@ func (s *ClusterService) saveOrderRecord(intent domain.LogicalOrderIntent, resul
 		OrderTime:     result.OrderTime,
 		CreatedAt:     time.Now(),
 	}
-	for _, buyer := range intent.Buyers {
-		if buyer.Name != "" {
-			record.BuyerNames = append(record.BuyerNames, buyer.Name)
+	if child != nil {
+		record.BuyerIndex = child.BuyerIndex
+		record.BuyerID = child.BuyerID
+		record.Status = child.State
+		if child.BuyerName != "" {
+			record.BuyerNames = []string{child.BuyerName}
+		}
+	} else {
+		for _, buyer := range intent.Buyers {
+			if buyer.Name != "" {
+				record.BuyerNames = append(record.BuyerNames, buyer.Name)
+			}
 		}
 	}
 	if result.FinishedAt.IsZero() {
@@ -67,14 +143,11 @@ func (s *ClusterService) saveOrderRecord(intent domain.LogicalOrderIntent, resul
 			}
 		}
 	}
-	for _, attempt := range s.dispatcher.Attempts() {
-		if attempt.ID == result.AttemptID {
-			record.AccountID = attempt.AccountID
-			record.WorkerID = attempt.WorkerID
-			break
-		}
-	}
-	if (record.AccountID == "" || record.WorkerID == "") && s.repository != nil {
+	// The dispatcher persists the completed attempt before invoking the
+	// success handler. Read it from the repository rather than calling back
+	// into the dispatcher: success handling runs while the dispatcher lock is
+	// held, so taking that lock again here would deadlock the payment path.
+	if s.repository != nil {
 		if attempts, err := s.repository.ListAttempts(ctx); err == nil {
 			for _, attempt := range attempts {
 				if attempt.ID == result.AttemptID {

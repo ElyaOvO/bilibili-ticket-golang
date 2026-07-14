@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log"
 	"time"
 
@@ -36,6 +35,7 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 		deployJobs:           make(map[string]*RemoteWorkerDeployJob),
 		buyerSyncBatches:     make(map[string]*BuyerSyncBatch),
 		bwsMeta:              make(map[string]BWSSubmitInput),
+		openedPaymentWindows: make(map[string]bool),
 	}
 	service.loadBWSMetadata()
 	// Wire the worker selection strategy: the provisioner uses the
@@ -60,20 +60,43 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 			return err
 		},
 	})
-	service.dispatcher.SetSuccessHandler(func(intent domain.LogicalOrderIntent, result domain.ExecutionResult) {
-		log.Printf("[cluster] onSuccess callback ENTER: intent=%s success=%v orderID=%s paymentURL=%q",
-			intent.ID, result.Success, result.OrderID, result.PaymentURL)
+	handleOrderResult := func(intent domain.LogicalOrderIntent, result domain.ExecutionResult) {
+		log.Printf("[cluster] order result callback ENTER: intent=%s success=%v partial=%v orderID=%s",
+			intent.ID, result.Success, result.Partial, result.OrderID)
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[cluster] onSuccess callback PANIC: intent=%s panic=%v", intent.ID, r)
+				log.Printf("[cluster] order result callback PANIC: intent=%s panic=%v", intent.ID, r)
 			}
 		}()
-		if service.notify != nil {
-			service.notify(fmt.Sprintf("购票成功：Intent %s，订单 %s", intent.ID, result.OrderID))
+		// Persist the order before starting any external notification request.
+		// A slow or broken notification endpoint must never prevent the
+		// employer from learning about an order that needs payment.
+		records, err := service.saveOrderRecords(intent, result)
+		if err != nil {
+			log.Printf("[cluster] save order record failed: intent=%s orderID=%s: %v", intent.ID, result.OrderID, err)
+		} else {
+			for _, record := range records {
+				if record.Status == "" || record.Status == domain.SubOrderSucceeded {
+					go service.openOrderRecordPaymentWindowOnce(record)
+				}
+			}
 		}
-		service.openPayQRWindow(intent, result)
-		log.Printf("[cluster] onSuccess callback DONE: intent=%s", intent.ID)
-	})
+		if notify := service.notify; notify != nil {
+			message := service.ticketSuccessNotification(intent, result, records)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[cluster] success notifier PANIC: intent=%s panic=%v", intent.ID, r)
+					}
+				}()
+				notify(message)
+			}()
+		}
+		log.Printf("[cluster] order result callback DONE: intent=%s", intent.ID)
+	}
+	service.dispatcher.SetSuccessHandler(handleOrderResult)
+	service.dispatcher.SetPartialHandler(handleOrderResult)
+	service.dispatcher.SetProgressHandler(handleOrderResult)
 
 	// Wire the bidirectional heartbeat callback: when a worker pushes a
 	// completed task, the dispatcher processes it immediately instead of
@@ -83,7 +106,9 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 		log.Printf("[cluster] heartbeat push received: worker=%s attempt=%s success=%v orderID=%s paymentURL=%q",
 			workerID, result.AttemptID, result.Success, result.OrderID, result.PaymentURL)
 		result = service.dispatcher.ProcessCompletedTask(workerID, result)
-		service.RecordTaskCompleted(workerID, result)
+		if result.State.Terminal() {
+			service.RecordTaskCompleted(workerID, result)
+		}
 	})
 
 	// Restore persisted global configuration.
@@ -130,7 +155,26 @@ func (s *ClusterService) openPayQRWindow(intent domain.LogicalOrderIntent, resul
 func (s *ClusterService) Start(parent context.Context) error {
 	log.Printf("[cluster] starting cluster service (employer commit=%s)", global.GitCommit)
 	ctx, cancel := context.WithCancel(parent)
+	started := false
+	defer func() {
+		if !started {
+			cancel()
+			s.mu.Lock()
+			if s.lifecycleCtx == ctx {
+				s.cancel = nil
+				s.lifecycleCtx = nil
+			}
+			s.mu.Unlock()
+		}
+	}()
+	s.mu.Lock()
+	previousCancel := s.cancel
 	s.cancel = cancel
+	s.lifecycleCtx = ctx
+	s.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
 
 	// Clean up expired manual captcha sessions every minute.
 	go func() {
@@ -338,10 +382,15 @@ func (s *ClusterService) Start(parent context.Context) error {
 		// get a burst of ticks when switching.
 		fastCh := make(chan time.Time)
 		go func() {
-			for t := range fastTicker.C {
+			for {
 				select {
-				case fastCh <- t:
-				default:
+				case <-ctx.Done():
+					return
+				case t := <-fastTicker.C:
+					select {
+					case fastCh <- t:
+					default:
+					}
 				}
 			}
 		}()
@@ -373,7 +422,18 @@ func (s *ClusterService) Start(parent context.Context) error {
 	// This prevents the frontend from immediately dispatching tasks before
 	// the gRPC servers are ready to accept connections.
 	s.waitForLocalWorkers(ctx, 5*time.Second)
+	started = true
 	return nil
+}
+
+func (s *ClusterService) backgroundContext() context.Context {
+	s.mu.RLock()
+	ctx := s.lifecycleCtx
+	s.mu.RUnlock()
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 // waitForLocalWorkers polls all known local worker slots until they are
@@ -406,10 +466,27 @@ func (s *ClusterService) waitForLocalWorkers(ctx context.Context, timeout time.D
 // Close shuts down the cluster: cancels the reconciliation loop, stops
 // local workers, and closes the repository.
 func (s *ClusterService) Close() {
-	if s.cancel != nil {
-		s.cancel()
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancel = nil
+	s.lifecycleCtx = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	s.cancelAllTaskGroupWaves()
+	s.deployMu.RLock()
+	deployCancels := make([]context.CancelFunc, 0, len(s.deployJobs))
+	for _, job := range s.deployJobs {
+		if job != nil && job.cancel != nil {
+			deployCancels = append(deployCancels, job.cancel)
+		}
+	}
+	s.deployMu.RUnlock()
+	for _, cancelDeploy := range deployCancels {
+		cancelDeploy()
+	}
 	_ = s.local.Stop()
+	s.client.Close()
 	_ = s.repository.Close()
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -121,28 +122,37 @@ type LogEntry struct {
 }
 
 type Server struct {
-	config            Config
-	factory           BackendFactory
-	store             *SuccessStore
-	mu                sync.Mutex
-	tasks             map[string]*task
-	active            string
-	now               func() time.Time
-	completedNotifier func(t *task) // called when a task completes to push result over heartbeat
-	grpcServer        *grpc.Server  // set by ServeOn/ListenAndServe; nil until serving
-	captchaTester     CaptchaTester // optional; enables TestCaptcha RPC
+	config             Config
+	factory            BackendFactory
+	store              *SuccessStore
+	mu                 sync.Mutex
+	tasks              map[string]*task
+	active             string
+	now                func() time.Time
+	completedNotifier  func(t *task) // called when a task completes to push result over heartbeat
+	notifierGeneration uint64        // prevents an old stream from clearing a newer notifier
+	grpcServer         *grpc.Server  // set by ServeOn/ListenAndServe; nil until serving
+	captchaTester      CaptchaTester // optional; enables TestCaptcha RPC
+	stopped            bool
 
 	// Global configuration pushed by the employer via Configure RPC.
 	globalConfig   GlobalConfig
 	globalConfigMu sync.RWMutex
 
 	// Cached clock offsets (computed with TTL, reported in Health).
-	biliOffset   time.Duration
-	ntpOffset    time.Duration
-	offsetsReady bool
-	offsetsAt    time.Time
-	offsetsMu    sync.Mutex
+	biliOffset      time.Duration
+	ntpOffset       time.Duration
+	offsetsReady    bool
+	offsetsAt       time.Time
+	offsetsMu       sync.Mutex
+	lifecycleCancel context.CancelFunc
+	lifecycleWG     sync.WaitGroup
 }
+
+const (
+	maxRetainedTerminalTasks = 1000
+	terminalTaskRetention    = time.Hour
+)
 
 // GlobalConfig holds runtime configuration pushed by the employer.
 type GlobalConfig struct {
@@ -163,11 +173,27 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 			return executor.NewBilibiliBackend(spec.Credentials)
 		}
 	}
-	s := &Server{config: config, factory: factory, store: store, tasks: make(map[string]*task), now: time.Now}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	s := &Server{config: config, factory: factory, store: store, tasks: make(map[string]*task), now: time.Now, lifecycleCancel: lifecycleCancel}
 	for id, result := range store.All() {
-		s.tasks[id] = &task{spec: domain.ExecutionSpec{AttemptID: id, IntentID: result.IntentID}, specHash: result.SpecHash, state: domain.AttemptSucceeded, result: result}
+		if !result.State.Terminal() {
+			if !result.Partial {
+				continue
+			}
+			result.State = domain.AttemptPartial
+			result.Reason = domain.FailureWorkerLost
+			result.Retryable = false
+			result.Message = "worker restarted after partially creating split orders"
+			result.FinishedAt = time.Now()
+		}
+		s.tasks[id] = &task{spec: domain.ExecutionSpec{AttemptID: id, IntentID: result.IntentID}, specHash: result.SpecHash, state: result.State, result: result}
 	}
-	go s.reapLeases()
+	s.pruneTerminalTasksLocked()
+	s.lifecycleWG.Add(1)
+	go func() {
+		defer s.lifecycleWG.Done()
+		s.reapLeases(lifecycleCtx)
+	}()
 	return s, nil
 }
 
@@ -190,9 +216,11 @@ func (s *Server) Stop() {
 	s.mu.Lock()
 	gs := s.grpcServer
 	s.grpcServer = nil
-	// Cancel the currently active task if any.
-	if s.active != "" {
-		if t := s.tasks[s.active]; t != nil && t.cancel != nil {
+	s.stopped = true
+	// Cancel every running task. BWS tasks may coexist, so s.active alone is
+	// not sufficient to shut the worker down.
+	for _, t := range s.tasks {
+		if t != nil && !t.state.Terminal() && t.cancel != nil {
 			t.cancel()
 		}
 	}
@@ -200,6 +228,10 @@ func (s *Server) Stop() {
 	if gs != nil {
 		gs.Stop()
 	}
+	if s.lifecycleCancel != nil {
+		s.lifecycleCancel()
+	}
+	s.lifecycleWG.Wait()
 }
 
 func (s *Server) ListenAndServe() error {
@@ -321,12 +353,31 @@ func (ws *workerService) Submit(_ context.Context, req *pb.SubmitRequest) (*pb.S
 	hash := spec.Hash()
 
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil, status.Error(codes.Unavailable, "worker is stopped")
+	}
 	if existing, ok := s.tasks[spec.AttemptID]; ok {
 		if existing.specHash != hash {
 			s.mu.Unlock()
 			return nil, status.Error(codes.AlreadyExists, "attemptId already exists with a different spec")
 		}
 		resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(existing))}
+		s.mu.Unlock()
+		return resp, nil
+	}
+	if persisted, ok := s.store.Get(spec.AttemptID); ok {
+		if persisted.SpecHash != hash {
+			s.mu.Unlock()
+			return nil, status.Error(codes.AlreadyExists, "attemptId already exists with a different spec")
+		}
+		persistedTask := &task{
+			spec:     domain.ExecutionSpec{AttemptID: spec.AttemptID, IntentID: persisted.IntentID},
+			specHash: persisted.SpecHash,
+			state:    persisted.State,
+			result:   persisted,
+		}
+		resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(persistedTask))}
 		s.mu.Unlock()
 		return resp, nil
 	}
@@ -340,9 +391,13 @@ func (ws *workerService) Submit(_ context.Context, req *pb.SubmitRequest) (*pb.S
 	t := &task{spec: spec, specHash: hash, state: domain.AttemptWaiting, leaseUntil: s.now().Add(s.config.LeaseDuration), cancel: cancel}
 	s.tasks[spec.AttemptID], s.active = t, spec.AttemptID
 	resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(t))}
+	s.lifecycleWG.Add(1)
 	s.mu.Unlock()
 	s.logTask(t, "accepted", "task accepted for intent "+spec.IntentID, 0, false)
-	go s.run(ctx, t)
+	go func() {
+		defer s.lifecycleWG.Done()
+		s.run(ctx, t)
+	}()
 	return resp, nil
 }
 
@@ -362,6 +417,9 @@ func (ws *workerService) Status(_ context.Context, req *pb.StatusRequest) (*pb.S
 		t.leaseUntil = s.now().Add(s.config.LeaseDuration)
 	}
 	resp := &pb.StatusResponse{Status: statusToProto(s.snapshot(t))}
+	if t.state.Terminal() {
+		t.result.Credentials = domain.Credentials{}
+	}
 	s.mu.Unlock()
 	return resp, nil
 }
@@ -424,9 +482,7 @@ func (ws *workerService) Ack(_ context.Context, req *pb.AckRequest) (*pb.AckResp
 		s.mu.Unlock()
 		return nil, status.Error(codes.FailedPrecondition, "attempt is not terminal")
 	}
-	if !t.result.Success {
-		delete(s.tasks, id)
-	}
+	delete(s.tasks, id)
 	s.mu.Unlock()
 	return &pb.AckResponse{}, nil
 }
@@ -882,19 +938,44 @@ func (ws *workerService) Heartbeat(stream pb.WorkerService_HeartbeatServer) erro
 	s := ws.server
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
+	// gRPC permits one concurrent sender and one concurrent receiver per
+	// stream, but not multiple concurrent senders. Serialize periodic
+	// heartbeats and completion pushes so a successful result cannot be lost
+	// when it happens at the same instant as a heartbeat tick.
+	var sendMu sync.Mutex
+	send := func(msg *pb.HeartbeatMsg) error {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		return stream.Send(msg)
+	}
 
-	// Register a notifier so complete() can push finished tasks immediately.
+	// Register a notifier so progress snapshots and terminal results can be
+	// pushed immediately over the heartbeat stream.
+	s.mu.Lock()
+	s.notifierGeneration++
+	generation := s.notifierGeneration
 	s.completedNotifier = func(t *task) {
+		s.mu.Lock()
+		result := t.result
+		activeAttemptID := s.active
+		s.mu.Unlock()
 		msg := &pb.HeartbeatMsg{
 			WorkerId:        s.config.WorkerID,
-			ActiveAttemptId: "",
+			ActiveAttemptId: activeAttemptID,
 			Sequence:        0,
 			Time:            timestamppb.New(s.now()),
-			CompletedTask:   executionResultToProto(t.result),
+			CompletedTask:   executionResultToProto(result),
 		}
-		_ = stream.Send(msg)
+		_ = send(msg)
 	}
-	defer func() { s.completedNotifier = nil }()
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.notifierGeneration == generation {
+			s.completedNotifier = nil
+		}
+		s.mu.Unlock()
+	}()
 
 	// Send heartbeats to the master.
 	errCh := make(chan error, 1)
@@ -918,7 +999,7 @@ func (ws *workerService) Heartbeat(stream pb.WorkerService_HeartbeatServer) erro
 					Sequence:        seq,
 					Time:            timestamppb.New(s.now()),
 				}
-				if err := stream.Send(msg); err != nil {
+				if err := send(msg); err != nil {
 					errCh <- err
 					return
 				}
@@ -1100,6 +1181,8 @@ func attemptStateToProto(s domain.AttemptState) pb.AttemptState {
 		return pb.AttemptState_ATTEMPT_STOPPED
 	case domain.AttemptSucceeded:
 		return pb.AttemptState_ATTEMPT_SUCCEEDED
+	case domain.AttemptPartial:
+		return pb.AttemptState_ATTEMPT_PARTIAL
 	case domain.AttemptFailed:
 		return pb.AttemptState_ATTEMPT_FAILED
 	case domain.AttemptCooldown:
@@ -1123,12 +1206,16 @@ func executionResultToProto(r domain.ExecutionResult) *pb.ExecutionResult {
 		PaymentUrl:    r.PaymentURL,
 		PaymentExpire: r.PaymentExpire,
 		OrderTime:     r.OrderTime,
+		Partial:       r.Partial,
 		Credentials: &pb.Credentials{
 			Cookies:       r.Credentials.Cookies,
 			RefreshToken:  r.Credentials.RefreshToken,
 			Version:       r.Credentials.Version,
 			DeviceProfile: r.Credentials.DeviceProfile,
 		},
+	}
+	for _, child := range r.SubOrders {
+		er.SubOrders = append(er.SubOrders, subOrderResultToProto(child))
 	}
 	if len(r.Credentials.CookieJar) > 0 {
 		for _, hc := range r.Credentials.CookieJar {
@@ -1150,6 +1237,22 @@ func executionResultToProto(r domain.ExecutionResult) *pb.ExecutionResult {
 		er.FinishedAt = timestamppb.New(r.FinishedAt)
 	}
 	return er
+}
+
+func subOrderResultToProto(child domain.SubOrderResult) *pb.SubOrderResult {
+	state := pb.SubOrderState_SUB_ORDER_PENDING
+	switch child.State {
+	case domain.SubOrderSucceeded:
+		state = pb.SubOrderState_SUB_ORDER_SUCCEEDED
+	case domain.SubOrderFailed:
+		state = pb.SubOrderState_SUB_ORDER_FAILED
+	}
+	return &pb.SubOrderResult{
+		BuyerIndex: int32(child.BuyerIndex), BuyerId: child.BuyerID, BuyerName: child.BuyerName,
+		State: state, OrderId: child.OrderID, PaymentUrl: child.PaymentURL,
+		PaymentExpire: child.PaymentExpire, OrderTime: child.OrderTime,
+		Code: int32(child.Code), Message: child.Message,
+	}
 }
 
 func failureReasonToProto(r domain.FailureReason) pb.FailureReason {
@@ -1211,6 +1314,35 @@ func (s *Server) run(ctx context.Context, t *task) {
 		s.complete(t, domain.ExecutionResult{AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID, State: domain.AttemptFailed, Reason: domain.FailureInternal, Message: err.Error(), FinishedAt: s.now()})
 		return
 	}
+	if progressBackend, ok := backend.(executor.ProgressBackend); ok {
+		progressBackend.SetProgressSink(func(subOrders []domain.SubOrderResult) {
+			progress := domain.ExecutionResult{
+				AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID, SpecHash: t.specHash,
+				State: domain.AttemptRunning, SubOrders: append([]domain.SubOrderResult(nil), subOrders...),
+				StartedAt: s.now(),
+			}
+			succeeded := 0
+			for _, child := range subOrders {
+				if child.State == domain.SubOrderSucceeded {
+					succeeded++
+				}
+			}
+			// Until Engine emits its terminal success, any durable child order is
+			// partial progress. This also preserves an all-children-created snapshot
+			// if the worker exits in the narrow window before finalization.
+			progress.Partial = succeeded > 0
+			s.mu.Lock()
+			t.result = progress
+			s.mu.Unlock()
+			_ = s.store.Append(progress)
+			s.mu.Lock()
+			notify := s.completedNotifier
+			s.mu.Unlock()
+			if notify != nil {
+				notify(t)
+			}
+		})
+	}
 	s.mu.Lock()
 	if t.state == domain.AttemptWaiting {
 		t.state = domain.AttemptRunning
@@ -1252,9 +1384,14 @@ func (s *Server) run(ctx context.Context, t *task) {
 			return ms
 		},
 	}).Run(ctx, t.spec)
-	if result.Success {
+	if result.Success || result.Partial || len(result.SubOrders) > 0 {
 		if err := s.store.Append(result); err != nil {
-			result.Success, result.State, result.Reason, result.Message = false, domain.AttemptFailed, domain.FailureInternal, "persist success: "+err.Error()
+			result.Success, result.Reason, result.Message = false, domain.FailureInternal, "persist order result: "+err.Error()
+			if result.Partial {
+				result.State = domain.AttemptPartial
+			} else {
+				result.State = domain.AttemptFailed
+			}
 		}
 	}
 	s.complete(t, result)
@@ -1329,6 +1466,8 @@ func (s *Server) runBWS(ctx context.Context, t *task) {
 func (s *Server) complete(t *task, result domain.ExecutionResult) {
 	s.mu.Lock()
 	t.result, t.state = result, result.State
+	t.spec = domain.ExecutionSpec{AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID}
+	t.cancel = nil
 	if s.active == t.spec.AttemptID {
 		s.active = ""
 	}
@@ -1341,8 +1480,14 @@ func (s *Server) complete(t *task, result domain.ExecutionResult) {
 
 	// Push the result immediately via the heartbeat stream so the
 	// employer can dispatch the next task without waiting for a poll.
-	if s.completedNotifier != nil {
-		s.completedNotifier(t)
+	s.mu.Lock()
+	notify := s.completedNotifier
+	s.mu.Unlock()
+	if notify != nil {
+		notify(t)
+		s.mu.Lock()
+		t.result.Credentials = domain.Credentials{}
+		s.mu.Unlock()
 	}
 }
 
@@ -1372,16 +1517,60 @@ func (s *Server) logTask(t *task, stage, message string, code int, retryable boo
 	_ = WriteRedactedLog(s.config.DataDir, fmt.Sprintf("%s attempt=%s stage=%s code=%d retryable=%t message=%s", entry.Time.Format(time.RFC3339Nano), t.spec.AttemptID, stage, code, retryable, message))
 }
 
-func (s *Server) reapLeases() {
+func (s *Server) reapLeases(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		s.mu.Lock()
-		if t := s.tasks[s.active]; t != nil && !t.state.Terminal() && !t.leaseUntil.After(s.now()) {
-			t.state = domain.AttemptStopping
-			t.cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			if t := s.tasks[s.active]; t != nil && !t.state.Terminal() && !t.leaseUntil.After(s.now()) {
+				t.state = domain.AttemptStopping
+				t.cancel()
+			}
+			s.pruneTerminalTasksLocked()
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
+	}
+}
+
+func (s *Server) pruneTerminalTasksLocked() {
+	now := s.now()
+	type terminalTask struct {
+		id       string
+		finished time.Time
+	}
+	terminal := make([]terminalTask, 0, len(s.tasks))
+	for id, task := range s.tasks {
+		if task == nil || !task.state.Terminal() {
+			continue
+		}
+		finished := task.result.FinishedAt
+		if !finished.IsZero() && now.Sub(finished) >= terminalTaskRetention {
+			delete(s.tasks, id)
+			continue
+		}
+		terminal = append(terminal, terminalTask{id: id, finished: finished})
+	}
+	if len(terminal) <= maxRetainedTerminalTasks {
+		return
+	}
+	sort.Slice(terminal, func(i, j int) bool {
+		if terminal[i].finished.IsZero() && terminal[j].finished.IsZero() {
+			return terminal[i].id < terminal[j].id
+		}
+		if terminal[i].finished.IsZero() {
+			return true
+		}
+		if terminal[j].finished.IsZero() {
+			return false
+		}
+		return terminal[i].finished.Before(terminal[j].finished)
+	})
+	for _, task := range terminal[:len(terminal)-maxRetainedTerminalTasks] {
+		delete(s.tasks, task.id)
 	}
 }
 

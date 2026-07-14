@@ -29,6 +29,7 @@ const (
 	deployStatusFailed        = "failed"
 	deployStatusCancelled     = "cancelled"
 	deployStatusPartialFailed = "partial_failed"
+	maxRetainedDeployJobs     = 50
 )
 
 type RemoteWorkerDeployRequest struct {
@@ -114,7 +115,7 @@ func (s *ClusterService) StartBatchDeployRemoteWorkers(document string) (string,
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.backgroundContext())
 	job := &RemoteWorkerDeployJob{
 		ID:        randomClusterID("deploy"),
 		Status:    deployStatusRunning,
@@ -137,6 +138,7 @@ func (s *ClusterService) StartBatchDeployRemoteWorkers(document string) (string,
 		s.deployJobs = make(map[string]*RemoteWorkerDeployJob)
 	}
 	s.deployJobs[job.ID] = job
+	s.pruneDeployJobsLocked()
 	s.deployMu.Unlock()
 
 	go s.runRemoteWorkerDeployJob(ctx, job.ID, req)
@@ -156,12 +158,16 @@ func (s *ClusterService) GetRemoteWorkerDeployJob(jobID string) (RemoteWorkerDep
 func (s *ClusterService) CancelRemoteWorkerDeployJob(jobID string) error {
 	s.deployMu.RLock()
 	job, ok := s.deployJobs[jobID]
+	var cancel context.CancelFunc
+	if ok && job != nil {
+		cancel = job.cancel
+	}
 	s.deployMu.RUnlock()
 	if !ok {
 		return fmt.Errorf("deploy job not found")
 	}
-	if job.cancel != nil {
-		job.cancel()
+	if cancel != nil {
+		cancel()
 	}
 	return nil
 }
@@ -940,6 +946,31 @@ func (s *ClusterService) finishDeployJob(jobID string, ctxErr error) {
 	}
 	now := time.Now()
 	job.FinishedAt = &now
+	if job.cancel != nil {
+		job.cancel()
+		job.cancel = nil
+	}
+	s.pruneDeployJobsLocked()
+}
+
+func (s *ClusterService) pruneDeployJobsLocked() {
+	type completedJob struct {
+		id string
+		at time.Time
+	}
+	completed := make([]completedJob, 0, len(s.deployJobs))
+	for id, job := range s.deployJobs {
+		if job != nil && job.FinishedAt != nil {
+			completed = append(completed, completedJob{id: id, at: *job.FinishedAt})
+		}
+	}
+	if len(completed) <= maxRetainedDeployJobs {
+		return
+	}
+	sort.Slice(completed, func(i, j int) bool { return completed[i].at.Before(completed[j].at) })
+	for _, job := range completed[:len(completed)-maxRetainedDeployJobs] {
+		delete(s.deployJobs, job.id)
+	}
 }
 
 func cloneDeployJob(job *RemoteWorkerDeployJob) RemoteWorkerDeployJob {

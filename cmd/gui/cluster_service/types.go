@@ -94,15 +94,17 @@ type MacroSummary struct {
 
 // AttemptSummary is a lightweight view of an execution attempt for the UI.
 type AttemptSummary struct {
-	ID                  string               `json:"id"`
-	IntentID            string               `json:"intentId"`
-	AccountID           string               `json:"accountId"`
-	WorkerID            string               `json:"workerId"`
-	State               domain.AttemptState  `json:"state"`
-	OrderID             string               `json:"orderId,omitempty"`
-	PaymentURL          string               `json:"paymentUrl,omitempty"`
-	Reason              domain.FailureReason `json:"reason,omitempty"`
-	CooldownRemainingMs int64                `json:"cooldownRemainingMs"` // >0 when cooling, remaining milliseconds
+	ID                  string                  `json:"id"`
+	IntentID            string                  `json:"intentId"`
+	AccountID           string                  `json:"accountId"`
+	WorkerID            string                  `json:"workerId"`
+	State               domain.AttemptState     `json:"state"`
+	OrderID             string                  `json:"orderId,omitempty"`
+	PaymentURL          string                  `json:"paymentUrl,omitempty"`
+	Partial             bool                    `json:"partial,omitempty"`
+	SubOrders           []domain.SubOrderResult `json:"subOrders,omitempty"`
+	Reason              domain.FailureReason    `json:"reason,omitempty"`
+	CooldownRemainingMs int64                   `json:"cooldownRemainingMs"` // >0 when cooling, remaining milliseconds
 }
 
 // ClusterEventKind categorises a cluster-wide event for the unified log.
@@ -186,6 +188,7 @@ type ClusterService struct {
 	captchaSolver        biliutils.CaptchaSolverFn
 	catalog              *biliutils.BiliClient
 	cancel               context.CancelFunc
+	lifecycleCtx         context.Context
 	notify               func(string)
 	wailsApp             *application.App
 	globalCfg            globalConfig        // pushed to all workers via Configure RPC
@@ -197,6 +200,8 @@ type ClusterService struct {
 	buyerSyncMu          sync.RWMutex
 	buyerSyncBatches     map[string]*BuyerSyncBatch
 	bwsMeta              map[string]BWSSubmitInput // attemptID → BWS submit metadata
+	paymentWindowMu      sync.Mutex
+	openedPaymentWindows map[string]bool
 }
 
 type BuyerSyncState string
