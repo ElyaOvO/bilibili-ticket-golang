@@ -552,6 +552,7 @@
         "qrExpiresIn": "QR code expires in",
         "qrExpired": "QR code expired",
         "loginSuccess": "Login successful",
+        "gaiaReportWarning": "The account was saved, but the device risk report failed: {error}",
         "loginStartFailed": "Login start failed: {error}",
         "loginPollFailed": "Login polling failed: {error}",
         "loginEmptyQR": "Bilibili returned an empty login QR code. Please retry later.",

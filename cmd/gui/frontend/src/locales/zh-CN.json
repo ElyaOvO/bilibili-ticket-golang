@@ -552,6 +552,7 @@
         "qrExpiresIn": "二维码有效期剩余",
         "qrExpired": "二维码已过期",
         "loginSuccess": "登录成功",
+        "gaiaReportWarning": "账号已入库，但设备风控信息上报失败：{error}",
         "loginStartFailed": "发起登录失败: {error}",
         "loginPollFailed": "轮询登录失败: {error}",
         "loginEmptyQR": "B站返回了空的登录二维码，请稍后重试",

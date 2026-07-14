@@ -230,7 +230,7 @@ function startLoginPolling() {
                 loginStatusMsg.value = t('account.loginSuccess')
                 closeLoginDialog()
                 await load()
-                messages.add({ text: t('account.loginSuccess'), color: 'success' })
+                notifyLoginSucceeded(result)
             } else if (result.code === 86038) {
                 stopLoginPolling()
                 loginStatusMsg.value = t('account.qrExpired')
@@ -249,6 +249,17 @@ function startLoginPolling() {
 function stopLoginPolling() {
     loginPolling.value = false
     if (loginTimer) { clearInterval(loginTimer); loginTimer = null }
+}
+
+function notifyLoginSucceeded(result?: { warning?: string }) {
+    messages.add({ text: t('account.loginSuccess'), color: 'success' })
+    if (result?.warning) {
+        messages.add({
+            text: t('account.gaiaReportWarning', { error: result.warning }),
+            color: 'warning',
+            timeout: 10000,
+        })
+    }
 }
 
 function cancelLogin() {
@@ -320,10 +331,10 @@ async function finishSMSLogin() {
     smsSubmitting.value = true
     loginErrorMsg.value = ''
     try {
-        await FinishAccountSMSLogin(loginSessionID.value, loginPhone.value.trim(), Number(loginCid.value), loginSMSCode.value.trim())
+        const result = await FinishAccountSMSLogin(loginSessionID.value, loginPhone.value.trim(), Number(loginCid.value), loginSMSCode.value.trim())
         closeLoginDialog()
         await load()
-        messages.add({ text: t('account.loginSuccess'), color: 'success' })
+        notifyLoginSucceeded(result)
     } catch (e: any) {
         loginErrorMsg.value = t('account.smsLoginFailed', { error: String(e) })
         messages.addError(e, loginErrorMsg.value)
@@ -356,7 +367,7 @@ async function loginWithPassword() {
         }
         closeLoginDialog()
         await load()
-        messages.add({ text: t('account.loginSuccess'), color: 'success' })
+        notifyLoginSucceeded(result)
     } catch (e: any) {
         loginErrorMsg.value = t('account.passwordLoginFailed', { error: String(e) })
         messages.addError(e, loginErrorMsg.value)
@@ -417,7 +428,7 @@ async function onCaptchaSolved(result: { validate: string; seccode: string }) {
             }
             closeLoginDialog()
             await load()
-            messages.add({ text: t('account.loginSuccess'), color: 'success' })
+            notifyLoginSucceeded(result)
         } catch (e: any) {
             loginErrorMsg.value = t('account.passwordLoginFailed', { error: String(e) })
             messages.addError(e, loginErrorMsg.value)
@@ -489,10 +500,10 @@ async function finishSafecenterLogin() {
     safecenterSubmitting.value = true
     loginErrorMsg.value = ''
     try {
-        await FinishAccountSafecenterSMSLogin(safecenterSessionID.value, safecenterSMSCode.value.trim())
+        const result = await FinishAccountSafecenterSMSLogin(safecenterSessionID.value, safecenterSMSCode.value.trim())
         closeLoginDialog()
         await load()
-        messages.add({ text: t('account.loginSuccess'), color: 'success' })
+        notifyLoginSucceeded(result)
     } catch (e: any) {
         loginErrorMsg.value = t('account.safecenterVerifyFailed', { error: String(e) })
         messages.addError(e, loginErrorMsg.value)
