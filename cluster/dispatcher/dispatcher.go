@@ -24,6 +24,7 @@ type WorkerClient interface {
 	Submit(context.Context, domain.WorkerNode, domain.ExecutionSpec) error
 	Status(context.Context, domain.WorkerNode, string) (WorkerStatus, error)
 	Stop(context.Context, domain.WorkerNode, string) error
+	Ack(context.Context, domain.WorkerNode, string) error
 }
 
 type Repository interface {
@@ -71,9 +72,9 @@ type Dispatcher struct {
 	degraded            bool
 	now                 func() time.Time
 	next                uint64
-	onSuccess           func(domain.LogicalOrderIntent, domain.ExecutionResult)
-	onPartial           func(domain.LogicalOrderIntent, domain.ExecutionResult)
-	onProgress          func(domain.LogicalOrderIntent, domain.ExecutionResult)
+	onSuccess           func(domain.LogicalOrderIntent, domain.ExecutionResult) error
+	onPartial           func(domain.LogicalOrderIntent, domain.ExecutionResult) error
+	onProgress          func(domain.LogicalOrderIntent, domain.ExecutionResult) error
 	reportedSubOrders   map[string]bool
 	stoppedPhases       map[domain.Phase]bool
 	workerReservations  map[string]string // workerID → taskGroupID
@@ -82,19 +83,19 @@ type Dispatcher struct {
 	startDelayMs        int64 // global start delay (0 = no early start)
 }
 
-func (d *Dispatcher) SetSuccessHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult)) {
+func (d *Dispatcher) SetSuccessHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult) error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onSuccess = handler
 }
 
-func (d *Dispatcher) SetPartialHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult)) {
+func (d *Dispatcher) SetPartialHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult) error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onPartial = handler
 }
 
-func (d *Dispatcher) SetProgressHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult)) {
+func (d *Dispatcher) SetProgressHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult) error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.onProgress = handler
@@ -104,9 +105,9 @@ func New(client WorkerClient, repository Repository, resolver MappingResolver) *
 	return &Dispatcher{client: client, repository: repository, resolver: resolver, plans: make(map[string]*IntentPlan), attempts: make(map[string]*attempt), accounts: make(map[string]domain.Account), workers: make(map[string]domain.WorkerNode), accountBusy: make(map[string]string), workerBusy: make(map[string]string), accountReservations: make(map[string]string), failedWorkers: make(map[string]time.Time), quarantinedAccounts: make(map[string]time.Time), workerCooldown: make(map[string]time.Time), stoppedPhases: make(map[domain.Phase]bool), workerReservations: make(map[string]string), workerRoles: make(map[string]domain.ResourceRole), reportedSubOrders: make(map[string]bool), now: time.Now}
 }
 
-func (d *Dispatcher) reportNewSubOrders(plan *IntentPlan, result domain.ExecutionResult) {
+func (d *Dispatcher) reportNewSubOrders(plan *IntentPlan, result domain.ExecutionResult) error {
 	if d.onProgress == nil || plan == nil {
-		return
+		return nil
 	}
 	newChildren := make([]domain.SubOrderResult, 0)
 	for _, child := range result.SubOrders {
@@ -117,16 +118,22 @@ func (d *Dispatcher) reportNewSubOrders(plan *IntentPlan, result domain.Executio
 		if d.reportedSubOrders[key] {
 			continue
 		}
-		d.reportedSubOrders[key] = true
 		newChildren = append(newChildren, child)
 	}
 	if len(newChildren) == 0 {
-		return
+		return nil
 	}
 	progress := result
 	progress.Partial = true
 	progress.SubOrders = newChildren
-	d.onProgress(plan.Intent, progress)
+	if err := d.onProgress(plan.Intent, progress); err != nil {
+		return err
+	}
+	for _, child := range newChildren {
+		key := fmt.Sprintf("%s:%d:%s", result.AttemptID, child.BuyerIndex, child.OrderID)
+		d.reportedSubOrders[key] = true
+	}
+	return nil
 }
 
 func uniqueNonEmpty(values []string) []string {
@@ -423,9 +430,10 @@ func (d *Dispatcher) MacroAttempts(macroID string) []domain.ExecutionAttempt {
 	return result
 }
 
-// DisarmMacro marks all intents of a macro as stopped, clears their attempts,
-// and releases busy accounts/workers. Call this after sending Stop to workers.
-func (d *Dispatcher) DisarmMacro(macroID string) {
+// DisarmMacro marks intents as stopped but retains active attempts as stopping
+// tombstones. A Stop RPC is only a cancellation request; the worker may still
+// publish an order created concurrently with that request.
+func (d *Dispatcher) DisarmMacro(macroID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for intentID, plan := range d.plans {
@@ -437,33 +445,38 @@ func (d *Dispatcher) DisarmMacro(macroID string) {
 			plan.Intent.Terminal = true
 			plan.Intent.FailureReason = domain.FailureStopped
 			if d.repository != nil {
-				_ = d.repository.PutIntent(context.Background(), plan.Intent)
+				if err := d.repository.PutIntent(context.Background(), plan.Intent); err != nil {
+					return err
+				}
 			}
 		}
-		// Clear attempts for this intent
-		for attemptID, current := range d.attempts {
+		for _, current := range d.attempts {
 			if current.planID == intentID {
 				if !current.value.State.Terminal() {
-					current.value.State = domain.AttemptStopped
+					now := d.now()
+					current.value.State = domain.AttemptStopping
+					current.value.UpdatedAt = now
 					current.value.Result = domain.ExecutionResult{
 						AttemptID: current.value.ID,
 						IntentID:  current.value.IntentID,
 						SpecHash:  current.value.SpecHash,
-						State:     domain.AttemptStopped,
+						State:     domain.AttemptStopping,
 						Reason:    domain.FailureStopped,
 						Message:   "macro disarmed by employer",
 					}
+					if current.isolatedUntil.IsZero() {
+						current.isolatedUntil = now.Add(195 * time.Second)
+					}
 				}
 				if d.repository != nil {
-					_ = d.repository.PutAttempt(context.Background(), current.value)
+					if err := d.repository.PutAttempt(context.Background(), current.value); err != nil {
+						return err
+					}
 				}
-				delete(d.accountBusy, current.value.AccountID)
-				delete(d.workerBusy, current.value.WorkerID)
-				delete(d.attempts, attemptID)
 			}
 		}
-		delete(d.plans, intentID)
 	}
+	return nil
 }
 
 func (d *Dispatcher) RemoveMacro(macroID string) error {
@@ -471,7 +484,7 @@ func (d *Dispatcher) RemoveMacro(macroID string) error {
 	defer d.mu.Unlock()
 	for _, current := range d.attempts {
 		plan := d.plans[current.planID]
-		if plan != nil && plan.Macro.ID == macroID && !current.value.State.Terminal() {
+		if plan != nil && plan.Macro.ID == macroID && (!current.value.State.Terminal() || !current.value.ResultAcknowledged) {
 			return fmt.Errorf("macro is used by active attempt %s", current.value.ID)
 		}
 	}
@@ -533,7 +546,7 @@ func (d *Dispatcher) RemoveTerminalAttempts(ids []string) []string {
 	removed := make([]string, 0, len(ids))
 	for _, id := range ids {
 		current, ok := d.attempts[id]
-		if !ok || !current.value.State.Terminal() {
+		if !ok || !current.value.State.Terminal() || !current.value.ResultAcknowledged {
 			continue
 		}
 		delete(d.attempts, id)
@@ -764,7 +777,17 @@ func (d *Dispatcher) allocationTargets(plans []*IntentPlan, totalSlots int) map[
 func (d *Dispatcher) poll(ctx context.Context) error {
 	for _, current := range d.attempts {
 		if current.value.State.Terminal() {
-			continue
+			if current.value.ResultPersisted && !current.value.ResultAcknowledged {
+				if err := d.acknowledgeResult(ctx, current); err != nil {
+					log.Printf("[dispatcher] retry acknowledge attempt=%s: %v", current.value.ID, err)
+				}
+				continue
+			}
+			if current.value.ResultAcknowledged {
+				continue
+			}
+			// A terminal state without ResultPersisted may be a local timeout or
+			// a previous persistence failure. Poll it again instead of ACKing it.
 		}
 		worker := d.workers[current.value.WorkerID]
 		rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
@@ -773,25 +796,55 @@ func (d *Dispatcher) poll(ctx context.Context) error {
 		if err != nil {
 			now := d.now()
 			d.failedWorkers[worker.ID] = now
-			d.quarantinedAccounts[current.value.AccountID] = now.Add(195 * time.Second)
-			current.isolatedUntil = now.Add(195 * time.Second)
+			if current.isolatedUntil.IsZero() {
+				current.isolatedUntil = now.Add(195 * time.Second)
+			}
+			d.quarantinedAccounts[current.value.AccountID] = current.isolatedUntil
 			d.degraded = true
-			current.value.State, current.value.UpdatedAt = domain.AttemptFailed, now
-			current.value.Result = domain.ExecutionResult{AttemptID: current.value.ID, IntentID: current.value.IntentID, SpecHash: current.value.SpecHash, State: domain.AttemptFailed, Reason: domain.FailureWorkerLost, Message: err.Error(), FinishedAt: now}
-			delete(d.accountBusy, current.value.AccountID)
-			delete(d.workerBusy, current.value.WorkerID)
+			current.value.State, current.value.UpdatedAt = domain.AttemptUnknown, now
+			current.value.Result = domain.ExecutionResult{AttemptID: current.value.ID, IntentID: current.value.IntentID, SpecHash: current.value.SpecHash, State: domain.AttemptUnknown, Reason: domain.FailureWorkerLost, Message: err.Error()}
+			if !current.isolatedUntil.After(now) {
+				current.value.State = domain.AttemptFailed
+				current.value.Result.State = domain.AttemptFailed
+				current.value.Result.FinishedAt = now
+				delete(d.accountBusy, current.value.AccountID)
+				delete(d.workerBusy, current.value.WorkerID)
+			}
 			if d.repository != nil {
-				_ = d.repository.PutAttempt(ctx, current.value)
+				if persistErr := d.repository.PutAttempt(ctx, current.value); persistErr != nil {
+					return persistErr
+				}
 			}
 			continue
 		}
+		current.isolatedUntil = time.Time{}
 		current.value.State, current.value.UpdatedAt = status.State, d.now()
 		current.value.Result = status.Result
+		current.value.ResultPersisted = false
+		current.value.ResultAcknowledged = false
 		current.value.Result.Credentials = domain.Credentials{}
 		if d.repository != nil {
-			_ = d.repository.PutAttempt(ctx, current.value)
+			if err := d.repository.PutAttempt(ctx, current.value); err != nil {
+				return err
+			}
 		}
-		d.reportNewSubOrders(d.plans[current.planID], status.Result)
+		if err := d.reportNewSubOrders(d.plans[current.planID], status.Result); err != nil {
+			return err
+		}
+		plan := d.plans[current.planID]
+		if plan != nil && plan.Intent.Terminal && plan.Intent.FailureReason == domain.FailureStopped && !status.State.Terminal() {
+			rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+			_ = d.client.Stop(rpcCtx, worker, current.value.ID)
+			cancel()
+			current.value.State = domain.AttemptStopping
+			current.value.Result.State = domain.AttemptStopping
+			if d.repository != nil {
+				if err := d.repository.PutAttempt(ctx, current.value); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		// Track attempt-level cooldown for UI countdown display.
 		if status.State == domain.AttemptCooldown {
 			if current.cooldownUntil.IsZero() {
@@ -823,14 +876,30 @@ func (d *Dispatcher) poll(ctx context.Context) error {
 			if err := d.win(ctx, current, status.Result); err != nil {
 				return err
 			}
+			if err := d.markResultPersisted(ctx, current); err != nil {
+				return err
+			}
+			if err := d.acknowledgeResult(ctx, current); err != nil {
+				log.Printf("[dispatcher] acknowledge success attempt=%s: %v", current.value.ID, err)
+			}
 			continue
 		}
 		if status.Result.Partial && d.onPartial != nil {
-			d.onPartial(d.plans[current.planID].Intent, status.Result)
+			if err := d.onPartial(d.plans[current.planID].Intent, status.Result); err != nil {
+				return err
+			}
 		}
 		d.applyFailure(ctx, current, status.Result)
 		if d.repository != nil {
-			_ = d.repository.PutAttempt(ctx, current.value)
+			if err := d.repository.PutAttempt(ctx, current.value); err != nil {
+				return err
+			}
+		}
+		if err := d.markResultPersisted(ctx, current); err != nil {
+			return err
+		}
+		if err := d.acknowledgeResult(ctx, current); err != nil {
+			log.Printf("[dispatcher] acknowledge terminal attempt=%s: %v", current.value.ID, err)
 		}
 	}
 	return nil
@@ -841,9 +910,6 @@ func (d *Dispatcher) win(ctx context.Context, winner *attempt, result domain.Exe
 	firstSuccess := !plan.Intent.Succeeded
 	log.Printf("[dispatcher] win: intent=%s attempt=%s orderID=%s paymentURL=%q firstSuccess=%v onSuccess=%v",
 		plan.Intent.ID, result.AttemptID, result.OrderID, result.PaymentURL, firstSuccess, d.onSuccess != nil)
-	if firstSuccess {
-		plan.Intent.Succeeded, plan.Intent.Terminal = true, true
-	}
 	// Every successful attempt can represent a distinct order. Sibling
 	// replicas may both finish creating an order before the first one can be
 	// stopped, so report and persist every success. Only the logical intent
@@ -852,7 +918,12 @@ func (d *Dispatcher) win(ctx context.Context, winner *attempt, result domain.Exe
 	// Invoke the handler before MarkIntentSucceeded so the employer can
 	// durably record the order even if updating the intent later fails.
 	if d.onSuccess != nil {
-		d.onSuccess(plan.Intent, result)
+		if err := d.onSuccess(plan.Intent, result); err != nil {
+			return err
+		}
+	}
+	if firstSuccess {
+		plan.Intent.Succeeded, plan.Intent.Terminal = true, true
 	}
 	if d.repository != nil {
 		if err := d.repository.MarkIntentSucceeded(ctx, plan.Intent, result); err != nil {
@@ -956,6 +1027,46 @@ func (d *Dispatcher) applyFailure(ctx context.Context, current *attempt, result 
 	}
 }
 
+// acknowledgeResult removes a result from the worker outbox only after all
+// employer-side durable processing has completed. The local marker is written
+// after the worker accepts the ACK, so history cleanup cannot race redelivery.
+func (d *Dispatcher) acknowledgeResult(ctx context.Context, current *attempt) error {
+	if current.value.ResultAcknowledged {
+		return nil
+	}
+	if !current.value.ResultPersisted {
+		return errors.New("result has not completed employer-side durable processing")
+	}
+	worker, ok := d.workers[current.value.WorkerID]
+	if !ok {
+		return fmt.Errorf("worker %s not found", current.value.WorkerID)
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	err := d.client.Ack(rpcCtx, worker, current.value.ID)
+	cancel()
+	if err != nil {
+		return err
+	}
+	current.value.ResultAcknowledged = true
+	current.value.UpdatedAt = d.now()
+	if d.repository != nil {
+		return d.repository.PutAttempt(ctx, current.value)
+	}
+	return nil
+}
+
+func (d *Dispatcher) markResultPersisted(ctx context.Context, current *attempt) error {
+	current.value.ResultPersisted = true
+	current.value.UpdatedAt = d.now()
+	if d.repository != nil {
+		if err := d.repository.PutAttempt(ctx, current.value); err != nil {
+			current.value.ResultPersisted = false
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *Dispatcher) conflicted(candidate *IntentPlan) bool {
 	for _, current := range d.attempts {
 		if current.value.State.Terminal() || current.planID == candidate.Intent.ID {
@@ -1007,7 +1118,7 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	defer d.mu.Unlock()
 
 	attempt, ok := d.attempts[result.AttemptID]
-	if !ok || attempt.value.State.Terminal() {
+	if !ok || (attempt.value.State.Terminal() && attempt.value.ResultAcknowledged) {
 		if !ok {
 			log.Printf("[dispatcher] ProcessCompletedTask SKIP: attempt %s not found (worker=%s, resultState=%s, success=%v)",
 				result.AttemptID, workerID, result.State, result.Success)
@@ -1024,13 +1135,26 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	}
 	attempt.value.State, attempt.value.UpdatedAt = result.State, now
 	attempt.value.Result = result
+	attempt.value.ResultPersisted = false
+	attempt.value.ResultAcknowledged = false
 	attempt.value.Result.Credentials = domain.Credentials{}
 
 	// Persist the update.
 	if d.repository != nil {
-		_ = d.repository.PutAttempt(context.Background(), attempt.value)
+		if err := d.repository.PutAttempt(context.Background(), attempt.value); err != nil {
+			log.Printf("[dispatcher] persist pushed result attempt=%s: %v", attempt.value.ID, err)
+			return result
+		}
 	}
-	d.reportNewSubOrders(d.plans[attempt.planID], result)
+	plan := d.plans[attempt.planID]
+	if plan == nil {
+		log.Printf("[dispatcher] ProcessCompletedTask cannot map attempt %s to intent %s", attempt.value.ID, attempt.planID)
+		return result
+	}
+	if err := d.reportNewSubOrders(plan, result); err != nil {
+		log.Printf("[dispatcher] persist pushed progress attempt=%s: %v", attempt.value.ID, err)
+		return result
+	}
 
 	if !result.State.Terminal() {
 		return result
@@ -1052,15 +1176,31 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	}
 
 	if result.Success {
-		_ = d.win(context.Background(), attempt, result)
+		if err := d.win(context.Background(), attempt, result); err != nil {
+			log.Printf("[dispatcher] persist pushed success attempt=%s: %v", attempt.value.ID, err)
+			return result
+		}
 	} else {
 		if result.Partial && d.onPartial != nil {
-			d.onPartial(d.plans[attempt.planID].Intent, result)
+			if err := d.onPartial(plan.Intent, result); err != nil {
+				log.Printf("[dispatcher] persist pushed partial attempt=%s: %v", attempt.value.ID, err)
+				return result
+			}
 		}
 		d.applyFailure(context.Background(), attempt, result)
 		if d.repository != nil {
-			_ = d.repository.PutAttempt(context.Background(), attempt.value)
+			if err := d.repository.PutAttempt(context.Background(), attempt.value); err != nil {
+				log.Printf("[dispatcher] persist pushed failure attempt=%s: %v", attempt.value.ID, err)
+				return result
+			}
 		}
+	}
+	if err := d.markResultPersisted(context.Background(), attempt); err != nil {
+		log.Printf("[dispatcher] mark pushed result persisted attempt=%s: %v", attempt.value.ID, err)
+		return result
+	}
+	if err := d.acknowledgeResult(context.Background(), attempt); err != nil {
+		log.Printf("[dispatcher] acknowledge pushed result attempt=%s: %v", attempt.value.ID, err)
 	}
 
 	// Free resources immediately — trigger reconciliation in a separate
@@ -1280,9 +1420,10 @@ func (d *Dispatcher) dispatch(ctx context.Context, plan *IntentPlan, account dom
 		// A transport error does not prove that the worker rejected the task.
 		// Retain the attempt for audit and isolate its account until the old
 		// worker lease plus safety margin has expired.
-		value.State = domain.AttemptFailed
-		value.Result = domain.ExecutionResult{AttemptID: id, IntentID: plan.Intent.ID, SpecHash: spec.Hash(), State: domain.AttemptFailed, Reason: domain.FailureWorkerLost, Message: err.Error(), FinishedAt: now}
+		value.State = domain.AttemptUnknown
+		value.Result = domain.ExecutionResult{AttemptID: id, IntentID: plan.Intent.ID, SpecHash: spec.Hash(), State: domain.AttemptUnknown, Reason: domain.FailureWorkerLost, Message: err.Error()}
 		d.attempts[id] = &attempt{value: value, planID: plan.Intent.ID, isolatedUntil: now.Add(195 * time.Second)}
+		d.accountBusy[account.ID], d.workerBusy[worker.ID] = id, id
 		d.failedWorkers[worker.ID] = now
 		d.quarantinedAccounts[account.ID] = now.Add(195 * time.Second)
 		d.degraded = true
@@ -1325,7 +1466,18 @@ func (d *Dispatcher) SwitchToReflow(ctx context.Context) error {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
+		now := d.now()
 		current.value.State = domain.AttemptStopping
+		current.value.UpdatedAt = now
+		current.value.Result = domain.ExecutionResult{
+			AttemptID: current.value.ID, IntentID: current.value.IntentID, SpecHash: current.value.SpecHash,
+			State: domain.AttemptStopping, Reason: domain.FailureStopped, Message: "punctual phase stopped for reflow",
+		}
+		if d.repository != nil {
+			if err := d.repository.PutAttempt(ctx, current.value); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

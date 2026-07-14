@@ -289,12 +289,12 @@ func TestSuccessPersistsAndSurvivesRestart(t *testing.T) {
 	defer conn2.Close()
 	cli2 := pb.NewWorkerServiceClient(conn2)
 
-	resp, err := cli2.Status(ctx, &pb.StatusRequest{AttemptId: "a"})
-	if err != nil {
-		t.Fatalf("persisted status: %v", err)
+	if _, err := cli2.Status(ctx, &pb.StatusRequest{AttemptId: "a"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("acknowledged task status code=%s, want NotFound", status.Code(err))
 	}
-	if resp.Status.State != pb.AttemptState_ATTEMPT_SUCCEEDED {
-		t.Fatalf("persisted state=%v", resp.Status.State)
+	idempotent, err = cli2.Submit(ctx, &pb.SubmitRequest{Spec: sp})
+	if err != nil || idempotent.Status.State != pb.AttemptState_ATTEMPT_SUCCEEDED {
+		t.Fatalf("persisted idempotent submit after restart: status=%v err=%v", idempotent.GetStatus(), err)
 	}
 
 	changed := mustSpecProto(t, workerSpec("a"))
@@ -327,12 +327,13 @@ func TestTaskLogsAreBoundedAndRedacted(t *testing.T) {
 	}
 }
 
-func TestSuccessStoreCacheIsBounded(t *testing.T) {
-	store := &SuccessStore{results: make(map[string]domain.ExecutionResult)}
+func TestSuccessStoreCacheIsBoundedWithoutEvictingUnacked(t *testing.T) {
+	store := &SuccessStore{results: make(map[string]domain.ExecutionResult), acked: make(map[string]bool)}
 	for i := 0; i < maxCachedSuccessResults+25; i++ {
 		id := fmt.Sprintf("attempt-%d", i)
 		store.order = append(store.order, id)
 		store.results[id] = domain.ExecutionResult{AttemptID: id}
+		store.acked[id] = i < 25
 	}
 	store.trimLocked()
 	if len(store.results) != maxCachedSuccessResults || len(store.order) != maxCachedSuccessResults {
@@ -340,6 +341,9 @@ func TestSuccessStoreCacheIsBounded(t *testing.T) {
 	}
 	if _, exists := store.results["attempt-0"]; exists {
 		t.Fatal("oldest result was not evicted")
+	}
+	if _, exists := store.results["attempt-25"]; !exists {
+		t.Fatal("unacknowledged result was evicted")
 	}
 }
 
@@ -488,5 +492,117 @@ func TestSuccessStoreKeepsLatestPartialSnapshot(t *testing.T) {
 	got := reopened.All()["a"]
 	if !got.Partial || len(got.SubOrders) != 2 || got.SubOrders[0].OrderID != "order-1" {
 		t.Fatalf("unexpected snapshot: %#v", got)
+	}
+}
+
+func TestSuccessStoreReplaysUntilDurableAck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "success-orders.jsonl")
+	store, err := OpenSuccessStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := domain.ExecutionResult{AttemptID: "a", State: domain.AttemptSucceeded, Success: true, OrderID: "order-1"}
+	if err := store.Append(result); err != nil {
+		t.Fatal(err)
+	}
+	if pending := store.Unacked(); len(pending) != 1 || pending[0].OrderID != "order-1" {
+		t.Fatalf("pending before ACK=%#v", pending)
+	}
+
+	reopened, err := OpenSuccessStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := reopened.Unacked(); len(pending) != 1 {
+		t.Fatalf("pending after restart=%#v", pending)
+	}
+	if err := reopened.Ack("a"); err != nil {
+		t.Fatal(err)
+	}
+	if pending := reopened.Unacked(); len(pending) != 0 {
+		t.Fatalf("pending after ACK=%#v", pending)
+	}
+
+	reopenedAgain, err := OpenSuccessStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := reopenedAgain.Unacked(); len(pending) != 0 {
+		t.Fatalf("ACK did not survive restart: %#v", pending)
+	}
+	if stored, ok := reopenedAgain.Get("a"); !ok || stored.OrderID != "order-1" {
+		t.Fatalf("ACK removed idempotency record: result=%#v ok=%v", stored, ok)
+	}
+}
+
+func TestRestartPromotesDurablePartialProgressForAcknowledgement(t *testing.T) {
+	dir := t.TempDir()
+	config := Config{Listen: "127.0.0.1:0", DataDir: dir, PollInterval: 10 * time.Second}
+	if err := config.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenSuccessStore(filepath.Join(dir, "success-orders.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := domain.ExecutionResult{
+		AttemptID: "partial", IntentID: "i", State: domain.AttemptRunning, Partial: true,
+		SubOrders: []domain.SubOrderResult{{BuyerIndex: 0, State: domain.SubOrderSucceeded, OrderID: "order-1"}},
+	}
+	if err := store.Append(progress); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(config, func(domain.ExecutionSpec) (executor.Backend, error) { return backend{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop()
+	pending := server.unackedResults()
+	if len(pending) != 1 || pending[0].State != domain.AttemptPartial || !pending[0].State.Terminal() {
+		t.Fatalf("recovered partial result is not ACKable: %#v", pending)
+	}
+}
+
+func TestHeartbeatReplaysCompletedResultUntilAck(t *testing.T) {
+	config := Config{Listen: "127.0.0.1:0", DataDir: t.TempDir(), PollInterval: 10 * time.Second}
+	cli, cleanup := startTestServer(t, config, func(domain.ExecutionSpec) (executor.Backend, error) {
+		return backend{outcome: executor.Outcome{OrderID: "order-replay"}}, nil
+	})
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := cli.Submit(ctx, &pb.SubmitRequest{Spec: mustSpecProto(t, workerSpec("replay"))}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		resp, err := cli.Status(ctx, &pb.StatusRequest{AttemptId: "replay"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Status.State == pb.AttemptState_ATTEMPT_SUCCEEDED {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	stream, err := cli.Heartbeat(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Send(&pb.HeartbeatMsg{WorkerId: "test", Time: timestamppb.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.CompletedTask == nil || msg.CompletedTask.AttemptId != "replay" || msg.CompletedTask.OrderId != "order-replay" {
+		t.Fatalf("heartbeat did not replay result: %#v", msg)
+	}
+	if _, err := cli.Ack(ctx, &pb.AckRequest{AttemptId: "replay"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Ack(ctx, &pb.AckRequest{AttemptId: "replay"}); err != nil {
+		t.Fatalf("ACK is not idempotent: %v", err)
 	}
 }

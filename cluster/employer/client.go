@@ -375,15 +375,12 @@ func (c *WorkerClient) Ack(ctx context.Context, node domain.WorkerNode, attemptI
 		return err
 	}
 	_, err = cli.Ack(ctx, &pb.AckRequest{AttemptId: attemptID})
-	if err != nil {
-		st, _ := status.FromError(err)
-		if st.Code() == codes.FailedPrecondition || st.Code() == codes.NotFound {
-			return err
-		}
-		// Ack is best-effort; network errors are not fatal.
+	if status.Code(err) == codes.NotFound {
+		// ACK is idempotent from the employer's perspective: NOT_FOUND means
+		// the worker no longer has an unacknowledged runtime task.
 		return nil
 	}
-	return nil
+	return err
 }
 
 // Configure pushes global settings (retry interval, start delay) to a worker.

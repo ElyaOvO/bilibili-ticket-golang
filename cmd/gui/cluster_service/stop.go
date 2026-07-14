@@ -80,6 +80,35 @@ func (s *ClusterService) ForceRestartTaskGroup(taskGroupID string, workerIDsJSON
 	if err := s.ForceStopTaskGroup(taskGroupID); err != nil {
 		return fmt.Errorf("force stop: %w", err)
 	}
+	// Stop now retains Attempt tombstones until the worker confirms a terminal
+	// result or the lease safety window expires. Do not overlap a forced restart
+	// with those possibly still-running remote attempts.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	macros, err := s.repository.ListMacroTasks(ctx)
+	if err != nil {
+		return err
+	}
+	for {
+		active := false
+		for _, macro := range macros {
+			if macro.TaskGroupID == taskGroupID && s.dispatcher.MacroActive(macro.ID) {
+				active = true
+				break
+			}
+		}
+		if !active {
+			break
+		}
+		if err := s.dispatcher.Reconcile(ctx); err != nil {
+			return fmt.Errorf("wait for stopped attempts: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for stopped attempts: %w", ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 	return s.StartTaskGroup(taskGroupID, workerIDsJSON)
 }
 
@@ -117,7 +146,9 @@ func (s *ClusterService) stopTaskGroupInternal(ctx context.Context, taskGroupID 
 			}
 			_ = s.client.Stop(ctx, worker, a.ID)
 		}
-		s.dispatcher.DisarmMacro(macroID)
+		if err := s.dispatcher.DisarmMacro(macroID); err != nil {
+			return fmt.Errorf("persist stopping attempts for macro %s: %w", macroID, err)
+		}
 	}
 	s.dispatcher.ReleaseTaskGroup(taskGroupID)
 	log.Printf("[cluster] released resource reservations for task group %s", taskGroupID)

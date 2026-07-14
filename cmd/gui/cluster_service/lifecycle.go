@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -60,12 +61,13 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 			return err
 		},
 	})
-	handleOrderResult := func(intent domain.LogicalOrderIntent, result domain.ExecutionResult) {
+	handleOrderResult := func(intent domain.LogicalOrderIntent, result domain.ExecutionResult) (handlerErr error) {
 		log.Printf("[cluster] order result callback ENTER: intent=%s success=%v partial=%v orderID=%s",
 			intent.ID, result.Success, result.Partial, result.OrderID)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[cluster] order result callback PANIC: intent=%s panic=%v", intent.ID, r)
+				handlerErr = fmt.Errorf("order result callback panic: %v", r)
 			}
 		}()
 		// Persist the order before starting any external notification request.
@@ -74,11 +76,11 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 		records, err := service.saveOrderRecords(intent, result)
 		if err != nil {
 			log.Printf("[cluster] save order record failed: intent=%s orderID=%s: %v", intent.ID, result.OrderID, err)
-		} else {
-			for _, record := range records {
-				if record.Status == "" || record.Status == domain.SubOrderSucceeded {
-					go service.openOrderRecordPaymentWindowOnce(record)
-				}
+			return err
+		}
+		for _, record := range records {
+			if record.Status == "" || record.Status == domain.SubOrderSucceeded {
+				go service.openOrderRecordPaymentWindowOnce(record)
 			}
 		}
 		if notify := service.notify; notify != nil {
@@ -93,6 +95,7 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 			}()
 		}
 		log.Printf("[cluster] order result callback DONE: intent=%s", intent.ID)
+		return nil
 	}
 	service.dispatcher.SetSuccessHandler(handleOrderResult)
 	service.dispatcher.SetPartialHandler(handleOrderResult)
@@ -361,13 +364,14 @@ func (s *ClusterService) Start(parent context.Context) error {
 	}
 	for _, value := range attempts {
 		if intent, known := intentByID[value.IntentID]; known && !intent.Armed && !value.State.Terminal() {
-			value.State = domain.AttemptStopped
+			// Preserve a stopping tombstone across employer restarts. The worker
+			// may still have completed an order concurrently with the old Stop.
+			value.State = domain.AttemptStopping
 			value.UpdatedAt = time.Now()
-			value.Result = domain.ExecutionResult{AttemptID: value.ID, IntentID: value.IntentID, SpecHash: value.SpecHash, State: domain.AttemptStopped, Reason: domain.FailureStopped, Message: "legacy unarmed attempt stopped during recovery", FinishedAt: value.UpdatedAt}
+			value.Result = domain.ExecutionResult{AttemptID: value.ID, IntentID: value.IntentID, SpecHash: value.SpecHash, State: domain.AttemptStopping, Reason: domain.FailureStopped, Message: "unarmed attempt retained for worker confirmation during recovery"}
 			if err := s.repository.PutAttempt(ctx, value); err != nil {
 				return global.NewFault("保存已停止的尝试记录", err, "检查集群数据库 data/employer.db 是否可写")
 			}
-			continue
 		}
 		if err := s.dispatcher.RestoreAttempt(value); err != nil {
 			return global.NewFault("恢复尝试记录", err, "尝试记录数据可能已损坏，可尝试删除 data/employer.db 重建")

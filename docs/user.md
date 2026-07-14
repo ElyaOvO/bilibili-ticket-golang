@@ -332,6 +332,7 @@ Worker 报告下单成功后, 雇主端会先持久化订单, 再触发支付弹
 | `queued` | 已排队，等待分配 Worker |
 | `waiting` | 已下发到 Worker，等待到达开抢时间 |
 | `running` | Worker 正在循环调用 Bilibili 下单接口 |
+| `unknown` | 通信暂时不确定；保留 Attempt 和资源隔离，等待 Worker 恢复或租约安全期结束 |
 | `stopping` | 正在取消中 |
 | `stopped` | 已被手动停止 |
 | `succeeded` | 下单成功，已有订单号 |

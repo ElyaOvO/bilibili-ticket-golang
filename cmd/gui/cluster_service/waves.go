@@ -298,7 +298,9 @@ func (s *ClusterService) pauseTaskGroupForNextWave(ctx context.Context, taskGrou
 			}
 			_ = s.client.Stop(ctx, worker, attempt.ID)
 		}
-		s.dispatcher.DisarmMacro(macro.ID)
+		if err := s.dispatcher.DisarmMacro(macro.ID); err != nil {
+			return fmt.Errorf("persist stopping attempts for macro %s: %w", macro.ID, err)
+		}
 	}
 	return nil
 }

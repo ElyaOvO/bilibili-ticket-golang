@@ -14,7 +14,9 @@ type client struct {
 	submitWorkers     []string
 	states            map[string]WorkerStatus
 	stopped           []string
+	acked             []string
 	failWorker        string
+	statusErr         bool
 	statusHadDeadline bool
 	submitHadDeadline bool
 	stopHadDeadline   bool
@@ -44,6 +46,9 @@ func (c *client) Status(ctx context.Context, _ domain.WorkerNode, id string) (Wo
 	if _, ok := ctx.Deadline(); ok {
 		c.statusHadDeadline = true
 	}
+	if c.statusErr {
+		return WorkerStatus{}, context.DeadlineExceeded
+	}
 	if status, ok := c.states[id]; ok {
 		return status, nil
 	}
@@ -54,6 +59,11 @@ func (c *client) Stop(ctx context.Context, _ domain.WorkerNode, id string) error
 	if _, ok := ctx.Deadline(); ok {
 		c.stopHadDeadline = true
 	}
+	return nil
+}
+
+func (c *client) Ack(_ context.Context, _ domain.WorkerNode, id string) error {
+	c.acked = append(c.acked, id)
 	return nil
 }
 
@@ -83,7 +93,7 @@ func (r *repo) BuyerDayOccupied(context.Context, []domain.BuyerDayKey) (bool, er
 
 func TestRemoveTerminalAttemptsKeepsNonTerminalAttempts(t *testing.T) {
 	d := New(&client{}, &repo{}, nil)
-	d.attempts["done"] = &attempt{value: domain.ExecutionAttempt{ID: "done", AccountID: "a1", WorkerID: "w1", State: domain.AttemptSucceeded}}
+	d.attempts["done"] = &attempt{value: domain.ExecutionAttempt{ID: "done", AccountID: "a1", WorkerID: "w1", State: domain.AttemptSucceeded, ResultAcknowledged: true}}
 	d.attempts["running"] = &attempt{value: domain.ExecutionAttempt{ID: "running", AccountID: "a2", WorkerID: "w2", State: domain.AttemptRunning}}
 	d.accountBusy["a1"] = "done"
 	d.workerBusy["w1"] = "done"
@@ -170,8 +180,9 @@ func TestEverySuccessfulReplicaIsReportedAndPersisted(t *testing.T) {
 	}}
 
 	var reported []domain.ExecutionResult
-	d.SetSuccessHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) {
+	d.SetSuccessHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) error {
 		reported = append(reported, result)
+		return nil
 	})
 
 	d.ProcessCompletedTask("w1", domain.ExecutionResult{
@@ -188,6 +199,102 @@ func TestEverySuccessfulReplicaIsReportedAndPersisted(t *testing.T) {
 	}
 	if len(r.successResult) != 2 || r.successResult[0].OrderID != "order-1" || r.successResult[1].OrderID != "order-2" {
 		t.Fatalf("successful replica results were not all persisted: %#v", r.successResult)
+	}
+}
+
+func TestLateSuccessOverridesTerminalAttemptAndIsAcknowledged(t *testing.T) {
+	c := &client{states: make(map[string]WorkerStatus)}
+	r := &repo{}
+	d := New(c, r, nil)
+	accounts, workers := resourcesN(1)
+	d.SetResources(accounts, workers)
+	intent := dispatchIntent("i", "m", 1, "buyer")
+	d.Add(IntentPlan{Macro: dispatchMacro("m", 1), Intent: intent})
+	d.attempts["late"] = &attempt{planID: intent.ID, value: domain.ExecutionAttempt{
+		ID: "late", IntentID: intent.ID, AccountID: accounts[0].ID, WorkerID: workers[0].ID,
+		State: domain.AttemptFailed, Result: domain.ExecutionResult{State: domain.AttemptFailed, Reason: domain.FailureWorkerLost},
+	}}
+
+	reported := 0
+	d.SetSuccessHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) error {
+		reported++
+		return nil
+	})
+	d.ProcessCompletedTask(workers[0].ID, domain.ExecutionResult{
+		AttemptID: "late", IntentID: intent.ID, State: domain.AttemptSucceeded,
+		Success: true, OrderID: "order-late",
+	})
+
+	got := d.attempts["late"].value
+	if got.State != domain.AttemptSucceeded || !got.ResultAcknowledged || reported != 1 {
+		t.Fatalf("late success was not durably accepted: attempt=%#v reported=%d", got, reported)
+	}
+	if len(c.acked) != 1 || c.acked[0] != "late" {
+		t.Fatalf("late success was not ACKed: %#v", c.acked)
+	}
+}
+
+func TestSuccessIsNotAcknowledgedUntilDurableHandlerSucceeds(t *testing.T) {
+	c := &client{states: make(map[string]WorkerStatus)}
+	d := New(c, &repo{}, nil)
+	accounts, workers := resourcesN(1)
+	d.SetResources(accounts, workers)
+	intent := dispatchIntent("i", "m", 1, "buyer")
+	d.Add(IntentPlan{Macro: dispatchMacro("m", 1), Intent: intent})
+	d.attempts["a"] = &attempt{planID: intent.ID, value: domain.ExecutionAttempt{
+		ID: "a", IntentID: intent.ID, AccountID: accounts[0].ID, WorkerID: workers[0].ID, State: domain.AttemptRunning,
+	}}
+	fail := true
+	d.SetSuccessHandler(func(domain.LogicalOrderIntent, domain.ExecutionResult) error {
+		if fail {
+			return fmt.Errorf("disk unavailable")
+		}
+		return nil
+	})
+	result := domain.ExecutionResult{AttemptID: "a", IntentID: intent.ID, State: domain.AttemptSucceeded, Success: true, OrderID: "order-1"}
+	d.ProcessCompletedTask(workers[0].ID, result)
+	if len(c.acked) != 0 || d.attempts["a"].value.ResultPersisted {
+		t.Fatalf("result was ACKed before durable handler succeeded: attempt=%#v ACKs=%#v", d.attempts["a"].value, c.acked)
+	}
+
+	fail = false
+	d.ProcessCompletedTask(workers[0].ID, result)
+	if len(c.acked) != 1 || !d.attempts["a"].value.ResultPersisted || !d.attempts["a"].value.ResultAcknowledged {
+		t.Fatalf("redelivered result was not ACKed: attempt=%#v ACKs=%#v", d.attempts["a"].value, c.acked)
+	}
+}
+
+func TestStatusTransportFailureRemainsUnknownUntilWorkerRecovers(t *testing.T) {
+	c := &client{states: make(map[string]WorkerStatus)}
+	d := New(c, nil, nil)
+	accounts, workers := resourcesN(1)
+	d.SetResources(accounts, workers)
+	intent := dispatchIntent("i", "m", 1, "buyer")
+	d.Add(IntentPlan{Macro: dispatchMacro("m", 1), Intent: intent})
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	id := c.submitted[0].AttemptID
+	c.statusErr = true
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.attempts[id].value.State; got != domain.AttemptUnknown || got.Terminal() {
+		t.Fatalf("transport failure state=%s, want non-terminal unknown", got)
+	}
+	if d.accountBusy[accounts[0].ID] != id || d.workerBusy[workers[0].ID] != id {
+		t.Fatal("unknown attempt released resources before its safety window")
+	}
+
+	c.statusErr = false
+	c.states[id] = WorkerStatus{State: domain.AttemptSucceeded, Result: domain.ExecutionResult{
+		AttemptID: id, IntentID: intent.ID, State: domain.AttemptSucceeded, Success: true, OrderID: "order-recovered",
+	}}
+	if err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.attempts[id].value; got.State != domain.AttemptSucceeded || !got.ResultAcknowledged {
+		t.Fatalf("recovered success=%#v", got)
 	}
 }
 
@@ -403,10 +510,12 @@ func TestDisarmMacroPersistsStoppedState(t *testing.T) {
 		t.Fatalf("expected one attempt, got %#v", c.submitted)
 	}
 
-	d.DisarmMacro("m")
+	if err := d.DisarmMacro("m"); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(d.Plans()) != 0 {
-		t.Fatalf("plans were not removed after disarm: %#v", d.Plans())
+	if len(d.Plans()) != 1 || d.Plans()[0].Intent.Armed || !d.Plans()[0].Intent.Terminal {
+		t.Fatalf("disarm did not retain a terminal plan tombstone: %#v", d.Plans())
 	}
 	if len(r.intents) == 0 {
 		t.Fatal("disarm did not persist stopped intent")
@@ -419,8 +528,15 @@ func TestDisarmMacroPersistsStoppedState(t *testing.T) {
 		t.Fatal("disarm did not persist stopped attempt")
 	}
 	attempt := r.attempts[len(r.attempts)-1]
-	if attempt.State != domain.AttemptStopped || attempt.Result.Reason != domain.FailureStopped {
+	if attempt.State != domain.AttemptStopping || attempt.Result.Reason != domain.FailureStopped {
 		t.Fatalf("unexpected persisted attempt state: %#v", attempt)
+	}
+	id := c.submitted[0].AttemptID
+	d.ProcessCompletedTask(workers[0].ID, domain.ExecutionResult{
+		AttemptID: id, IntentID: "i", State: domain.AttemptSucceeded, Success: true, OrderID: "order-after-stop",
+	})
+	if got := d.attempts[id].value; got.State != domain.AttemptSucceeded || !got.ResultAcknowledged {
+		t.Fatalf("success racing Disarm was lost: %#v", got)
 	}
 }
 
@@ -590,7 +706,7 @@ func TestAmbiguousSubmitFailureIsolatesAccountAndUsesStandby(t *testing.T) {
 		t.Fatalf("expected at least 2 attempts, got %#v", c.submitted)
 	}
 	first := d.attempts[c.submitted[0].AttemptID]
-	if first.value.State != domain.AttemptFailed || first.value.Result.Reason != domain.FailureWorkerLost {
+	if first.value.State != domain.AttemptUnknown || first.value.Result.Reason != domain.FailureWorkerLost {
 		t.Fatalf("ambiguous attempt was not retained: %#v", first.value)
 	}
 	if first.value.AccountID == d.attempts[c.submitted[1].AttemptID].value.AccountID {
@@ -730,8 +846,9 @@ func TestReportNewSubOrdersOnlyEmitsEachSuccessfulChildOnce(t *testing.T) {
 	d := New(nil, nil, nil)
 	plan := &IntentPlan{Intent: domain.LogicalOrderIntent{ID: "intent-1"}}
 	var updates []domain.ExecutionResult
-	d.SetProgressHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) {
+	d.SetProgressHandler(func(_ domain.LogicalOrderIntent, result domain.ExecutionResult) error {
 		updates = append(updates, result)
+		return nil
 	})
 
 	result := domain.ExecutionResult{

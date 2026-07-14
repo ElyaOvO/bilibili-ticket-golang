@@ -27,10 +27,14 @@ const (
 type AttemptState string
 
 const (
-	AttemptQueued    AttemptState = "queued"
-	AttemptWaiting   AttemptState = "waiting"
-	AttemptRunning   AttemptState = "running"
-	AttemptCooldown  AttemptState = "cooldown"
+	AttemptQueued   AttemptState = "queued"
+	AttemptWaiting  AttemptState = "waiting"
+	AttemptRunning  AttemptState = "running"
+	AttemptCooldown AttemptState = "cooldown"
+	// AttemptUnknown means the employer cannot currently determine whether the
+	// worker accepted or is still executing the attempt. It is deliberately
+	// non-terminal: a transport failure is not evidence that no order exists.
+	AttemptUnknown   AttemptState = "unknown"
 	AttemptStopping  AttemptState = "stopping"
 	AttemptStopped   AttemptState = "stopped"
 	AttemptSucceeded AttemptState = "succeeded"
@@ -294,6 +298,10 @@ type ExecutionAttempt struct {
 	Lease     Lease           `json:"lease"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
+	// ResultAcknowledged is set only after every employer-side durable handler
+	// has accepted the terminal result. It gates destructive history cleanup.
+	ResultPersisted    bool `json:"resultPersisted,omitempty"`
+	ResultAcknowledged bool `json:"resultAcknowledged,omitempty"`
 }
 
 type ExecutionSpec struct {

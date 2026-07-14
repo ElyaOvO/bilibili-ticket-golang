@@ -75,7 +75,7 @@ func (s *ClusterService) DeleteTerminalAttempts(attemptIDs []string) error {
 		return err
 	}
 	removed := s.dispatcher.RemoveTerminalAttempts(attemptIDs)
-	for _, id := range attemptIDs {
+	for _, id := range removed {
 		_ = removeCachedLogs(id)
 	}
 	if len(removed) > 0 {

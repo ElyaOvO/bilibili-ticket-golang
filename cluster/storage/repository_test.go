@@ -103,6 +103,42 @@ func TestSuccessTransactionOccupiesAllBuyerDays(t *testing.T) {
 	}
 }
 
+func TestDeleteAttemptsRequiresDurableResultAcknowledgement(t *testing.T) {
+	r := openTestRepository(t)
+	ctx := context.Background()
+	if err := r.PutTaskGroup(ctx, domain.TaskGroup{ID: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	macro := domain.MacroTask{ID: "m", TaskGroupID: "g", EventDay: "2026-07-01", EventDayConfirmed: true, ProjectID: 1, ScreenID: 2, SKUID: 3}
+	if err := r.PutMacroTask(ctx, macro); err != nil {
+		t.Fatal(err)
+	}
+	intent, _ := domain.NewIntent("i", macro, domain.PhasePunctual, []domain.Buyer{{LogicalID: "b"}}, time.Now())
+	if err := r.PutIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	attempt := domain.ExecutionAttempt{ID: "a", IntentID: intent.ID, State: domain.AttemptFailed}
+	if err := r.PutAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DeleteAttempts(ctx, []string{attempt.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts, _ := r.ListAttempts(ctx); len(attempts) != 1 {
+		t.Fatalf("unacknowledged tombstone was deleted: %#v", attempts)
+	}
+	attempt.ResultAcknowledged = true
+	if err := r.PutAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DeleteAttempts(ctx, []string{attempt.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if attempts, _ := r.ListAttempts(ctx); len(attempts) != 0 {
+		t.Fatalf("acknowledged attempt was retained: %#v", attempts)
+	}
+}
+
 func TestClusterEventsCanBeClearedAndOrderRecordsListed(t *testing.T) {
 	r := openTestRepository(t)
 	ctx := context.Background()

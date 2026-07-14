@@ -332,7 +332,9 @@ func (s *ClusterService) startTaskGroupPhase(taskGroupID string, phase domain.Ph
 	// reservations.  Must be called on any error path after ReserveWorkers.
 	rollback := func(reason string) {
 		for _, macro := range selected {
-			s.dispatcher.DisarmMacro(macro.ID)
+			if err := s.dispatcher.DisarmMacro(macro.ID); err != nil {
+				log.Printf("[cluster] rollback persist stopping macro %s: %v", macro.ID, err)
+			}
 		}
 		s.dispatcher.ReleaseTaskGroup(taskGroupID)
 		log.Printf("[cluster] start task group %s rolled back: %s", taskGroupID, reason)

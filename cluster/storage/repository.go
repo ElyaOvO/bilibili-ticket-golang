@@ -329,7 +329,8 @@ func (r *Repository) resetMacroExecution(ctx context.Context, macroID string, fo
 // and related rows) for a macro.  This allows re-dispatching the failed
 // DeleteAttempts removes terminal attempts (succeeded/failed/stopped)
 // by their IDs, along with their execution_results and buyer_day_occupancy
-// rows.  Non-terminal attempts are silently skipped.
+// rows. Non-terminal or not-yet-ACKed attempts are silently skipped so a UI
+// cleanup cannot remove the tombstone needed for a late worker success.
 func (r *Repository) DeleteAttempts(ctx context.Context, attemptIDs []string) error {
 	if len(attemptIDs) == 0 {
 		return nil
@@ -342,13 +343,21 @@ func (r *Repository) DeleteAttempts(ctx context.Context, attemptIDs []string) er
 	for _, id := range attemptIDs {
 		// Only delete terminal attempts.
 		var state string
-		if err := tx.QueryRowContext(ctx, `SELECT state FROM attempts WHERE id=?`, id).Scan(&state); err != nil {
+		var payload []byte
+		if err := tx.QueryRowContext(ctx, `SELECT state,payload FROM attempts WHERE id=?`, id).Scan(&state, &payload); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
 			return err
 		}
 		if state != string(domain.AttemptSucceeded) && state != string(domain.AttemptPartial) && state != string(domain.AttemptFailed) && state != string(domain.AttemptStopped) {
+			continue
+		}
+		var attempt domain.ExecutionAttempt
+		if err := json.Unmarshal(payload, &attempt); err != nil {
+			return err
+		}
+		if !attempt.ResultAcknowledged {
 			continue
 		}
 		// Clean up related rows.

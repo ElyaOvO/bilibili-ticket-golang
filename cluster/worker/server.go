@@ -175,7 +175,8 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 	}
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	s := &Server{config: config, factory: factory, store: store, tasks: make(map[string]*task), now: time.Now, lifecycleCancel: lifecycleCancel}
-	for id, result := range store.All() {
+	for _, result := range store.Unacked() {
+		id := result.AttemptID
 		if !result.State.Terminal() {
 			if !result.Partial {
 				continue
@@ -185,6 +186,9 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 			result.Retryable = false
 			result.Message = "worker restarted after partially creating split orders"
 			result.FinishedAt = time.Now()
+			if err := store.Append(result); err != nil {
+				_ = WriteRedactedLog(config.DataDir, "persist recovered partial result failed: "+err.Error())
+			}
 		}
 		s.tasks[id] = &task{spec: domain.ExecutionSpec{AttemptID: id, IntentID: result.IntentID}, specHash: result.SpecHash, state: result.State, result: result}
 	}
@@ -475,12 +479,20 @@ func (ws *workerService) Ack(_ context.Context, req *pb.AckRequest) (*pb.AckResp
 	s.mu.Lock()
 	t, ok := s.tasks[id]
 	if !ok {
+		if _, persisted := s.store.Get(id); persisted && !s.store.IsUnacked(id) {
+			s.mu.Unlock()
+			return &pb.AckResponse{}, nil
+		}
 		s.mu.Unlock()
 		return nil, status.Error(codes.NotFound, "attempt not found")
 	}
 	if !t.state.Terminal() {
 		s.mu.Unlock()
 		return nil, status.Error(codes.FailedPrecondition, "attempt is not terminal")
+	}
+	if err := s.store.Ack(id); err != nil {
+		s.mu.Unlock()
+		return nil, status.Errorf(codes.Internal, "persist result acknowledgement: %v", err)
 	}
 	delete(s.tasks, id)
 	s.mu.Unlock()
@@ -977,6 +989,17 @@ func (ws *workerService) Heartbeat(stream pb.WorkerService_HeartbeatServer) erro
 		s.mu.Unlock()
 	}()
 
+	// Replay every durable result that has not yet been acknowledged. The
+	// notifier was registered first, closing the race with a concurrently
+	// completing task.
+	for _, result := range s.unackedResults() {
+		if err := send(&pb.HeartbeatMsg{
+			WorkerId: s.config.WorkerID, Sequence: 0, Time: timestamppb.New(s.now()),
+			CompletedTask: executionResultToProto(result),
+		}); err != nil {
+			return err
+		}
+	}
 	// Send heartbeats to the master.
 	errCh := make(chan error, 1)
 	go func() {
@@ -1002,6 +1025,17 @@ func (ws *workerService) Heartbeat(stream pb.WorkerService_HeartbeatServer) erro
 				if err := send(msg); err != nil {
 					errCh <- err
 					return
+				}
+				// Re-send unacknowledged results on every heartbeat. Employer-side
+				// persistence is idempotent, so a lost ACK is harmless.
+				for _, result := range s.unackedResults() {
+					if err := send(&pb.HeartbeatMsg{
+						WorkerId: s.config.WorkerID, Sequence: seq, Time: timestamppb.New(s.now()),
+						CompletedTask: executionResultToProto(result),
+					}); err != nil {
+						errCh <- err
+						return
+					}
 				}
 			}
 		}
@@ -1334,7 +1368,12 @@ func (s *Server) run(ctx context.Context, t *task) {
 			s.mu.Lock()
 			t.result = progress
 			s.mu.Unlock()
-			_ = s.store.Append(progress)
+			if !hasOrderFacts(progress) {
+				return
+			}
+			if err := s.store.Append(progress); err != nil {
+				_ = WriteRedactedLog(s.config.DataDir, "persist split-order progress failed: "+err.Error())
+			}
 			s.mu.Lock()
 			notify := s.completedNotifier
 			s.mu.Unlock()
@@ -1362,17 +1401,15 @@ func (s *Server) run(ctx context.Context, t *task) {
 		Clock:   executionClock,
 		Observe: func(event executor.Event) {
 			s.logTask(t, event.Stage, event.Message, event.Code, event.Retryable)
+			s.mu.Lock()
 			if !event.CooldownEnd.IsZero() {
-				s.mu.Lock()
 				t.state = domain.AttemptCooldown
 				t.cooldownUntil = event.CooldownEnd
-				s.mu.Unlock()
 			} else if t.state == domain.AttemptCooldown {
-				s.mu.Lock()
 				t.state = domain.AttemptRunning
 				t.cooldownUntil = time.Time{}
-				s.mu.Unlock()
 			}
+			s.mu.Unlock()
 		},
 		// Dynamic retry interval — reads the global config pushed by the
 		// employer via Configure RPC, so changes take effect immediately
@@ -1384,16 +1421,6 @@ func (s *Server) run(ctx context.Context, t *task) {
 			return ms
 		},
 	}).Run(ctx, t.spec)
-	if result.Success || result.Partial || len(result.SubOrders) > 0 {
-		if err := s.store.Append(result); err != nil {
-			result.Success, result.Reason, result.Message = false, domain.FailureInternal, "persist order result: "+err.Error()
-			if result.Partial {
-				result.State = domain.AttemptPartial
-			} else {
-				result.State = domain.AttemptFailed
-			}
-		}
-	}
 	s.complete(t, result)
 }
 
@@ -1464,6 +1491,14 @@ func (s *Server) runBWS(ctx context.Context, t *task) {
 }
 
 func (s *Server) complete(t *task, result domain.ExecutionResult) {
+	// A persistence failure must never turn a real remote success into a local
+	// failure. Keep the success in memory for heartbeat retries and log the
+	// degraded durability; if the append succeeds it also survives restarts.
+	if hasOrderFacts(result) {
+		if err := s.store.Append(result); err != nil {
+			_ = WriteRedactedLog(s.config.DataDir, "persist order result failed: "+err.Error())
+		}
+	}
 	s.mu.Lock()
 	t.result, t.state = result, result.State
 	t.spec = domain.ExecutionSpec{AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID}
@@ -1547,6 +1582,12 @@ func (s *Server) pruneTerminalTasksLocked() {
 		if task == nil || !task.state.Terminal() {
 			continue
 		}
+		// A task containing an order remains available until Ack deletes it.
+		// This also protects the in-memory fallback when the outbox disk write
+		// failed and there is no durable store entry to consult.
+		if hasOrderFacts(task.result) {
+			continue
+		}
 		finished := task.result.FinishedAt
 		if !finished.IsZero() && now.Sub(finished) >= terminalTaskRetention {
 			delete(s.tasks, id)
@@ -1572,6 +1613,37 @@ func (s *Server) pruneTerminalTasksLocked() {
 	for _, task := range terminal[:len(terminal)-maxRetainedTerminalTasks] {
 		delete(s.tasks, task.id)
 	}
+}
+
+func hasOrderFacts(result domain.ExecutionResult) bool {
+	if result.Success || result.OrderID != "" || result.PaymentURL != "" {
+		return true
+	}
+	for _, child := range result.SubOrders {
+		if child.State == domain.SubOrderSucceeded && (child.OrderID != "" || child.PaymentURL != "") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) unackedResults() []domain.ExecutionResult {
+	results := make([]domain.ExecutionResult, 0)
+	seen := make(map[string]bool)
+	s.mu.Lock()
+	for id, task := range s.tasks {
+		if task != nil && hasOrderFacts(task.result) {
+			results = append(results, task.result)
+			seen[id] = true
+		}
+	}
+	s.mu.Unlock()
+	for _, result := range s.store.Unacked() {
+		if !seen[result.AttemptID] {
+			results = append(results, result)
+		}
+	}
+	return results
 }
 
 func WriteRedactedLog(dataDir, line string) error {

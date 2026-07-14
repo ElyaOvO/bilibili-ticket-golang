@@ -131,9 +131,9 @@ Attempt 始终保留完整购票人列表, Worker 不会拆分或修改订单形
 
 ### 心跳与健康检查
 
-Employer 与每个已连接 Worker 维护一条 gRPC 双向 Heartbeat 流. 心跳间隔 5 秒, 超时阈值 15 秒. 调度器通常每 5 秒执行一次 `Reconcile`, 刷新资源状态并处理 Attempt 生命周期. 失联 Worker 的活跃 Attempt 会被故障转移到其他健康的 Worker.
+Employer 与每个已连接 Worker 维护一条 gRPC 双向 Heartbeat 流. 心跳间隔 5 秒, 超时阈值 15 秒. 调度器通常每 5 秒执行一次 `Reconcile`, 刷新资源状态并处理 Attempt 生命周期. 通信失败的 Attempt 进入非终态 `unknown`, 账号和 Worker 在租约安全期内保持隔离；传输错误本身不会否定 Worker 上可能已经产生的订单.
 
-Worker 端通过同一发送锁串行发送普通心跳和完成事件, 避免多个 goroutine 并发写同一条 gRPC 流. Heartbeat 完成事件用于低延迟通知, `Status` 轮询仍是终态结果的兜底读取路径.
+Worker 端通过同一发送锁串行发送普通心跳和完成事件, 避免多个 goroutine 并发写同一条 gRPC 流. 未经 Employer ACK 的订单结果在 Heartbeat 重连时立即重放, 并随后周期重放；`Status` 轮询仍是终态结果的另一条读取路径.
 
 ## 成功订单传递与付款提示
 
@@ -142,14 +142,16 @@ flowchart TD
     A[Worker 下单成功] --> B[写 success-orders.jsonl]
     B -->|fsync 完成| C[任务进入 succeeded]
     C --> D{结果到达 Employer}
-    D -->|Heartbeat 完成事件| E[Dispatcher 处理成功]
-    D -->|推送丢失或断线| F[Status 轮询读取终态]
+    D -->|Heartbeat 推送或 outbox 重放| E[Dispatcher 处理成功]
+    D -->|Status 轮询| F[读取终态]
     F --> E
     E --> G[持久化 Attempt]
     G --> H[写入 order_records]
     H --> I[异步打开支付二维码]
     H --> J[异步发送 Bark / Gotify / PushPlus]
+    H --> M[Employer 持久化完成后 ACK]
     E --> K[首个成功标记 Intent 胜出]
+    M --> N[Worker 持久化 ACK 并清理运行时任务]
     K --> L[停止仍在运行的兄弟副本]
 ```
 
@@ -157,9 +159,11 @@ flowchart TD
 
 - Worker 必须先将去凭据化的成功索引写入 `success-orders.jsonl` 并完成 fsync, 然后才报告成功.
 - Dispatcher 先持久化完成的 Attempt. 雇主端成功处理器随后同步写入 `order_records`, 再异步启动支付窗口和外部通知.
+- 只有 Attempt, `execution_results` 和 `order_records` 全部持久化成功后 Employer 才发送 ACK. 落库失败或 ACK 丢失时 Worker 会继续重放，所有写入均按 Attempt/子订单键幂等.
+- Stop/Disarm 只把 Attempt 置为 `stopping` 并保留墓碑，直到 Worker 返回终态并完成 ACK；迟到成功可以覆盖本地的失败或停止状态.
 - Bark, Gotify, PushPlus 超时, 配置错误或 panic 不会阻塞订单落库和支付窗口.
 - 同一 Intent 的多个副本可能在停止信号生效前分别完成真实下单. 第一个成功只负责确定逻辑 Intent 的胜者并停止兄弟副本; 每一个后来到达的真实成功结果仍会单独保存, 弹窗和通知.
-- Heartbeat 推送失败时, 周期性的 `Status` 查询会读取 Worker 保留的终态结果. 用户也可以从 **集群 → 订单记录** 重新打开仍在有效期内的支付链接.
+- Heartbeat 推送失败或连接中断时, Worker outbox 会在连接恢复后重复上报未 ACK 结果. 用户也可以从 **集群 → 订单记录** 重新打开仍在有效期内的支付链接.
 
 `Intent.Succeeded` 表示该逻辑订单已经至少有一个成功结果, 不表示其他并发副本不可能产生订单. 订单记录以成功 Attempt 和 Bilibili 订单号区分, 用户应逐笔核对并决定付款.
 
