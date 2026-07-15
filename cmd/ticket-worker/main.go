@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,11 +17,19 @@ import (
 	"bilibili-ticket-golang/cluster/worker"
 	biliclock "bilibili-ticket-golang/lib/biliutils/clock"
 	"bilibili-ticket-golang/lib/global"
+	"bilibili-ticket-golang/lib/reporting"
+	"bilibili-ticket-golang/process"
 
 	gc "bilibili-ticket-golang/captcha-solver"
 )
 
 func main() {
+	reporting.SetDefault(process.NewConfiguredReportClient(
+		global.ReportDSN,
+		global.ReportSalt,
+		global.ReportTimeout,
+		global.ReportSkipSSLCheck,
+	))
 	if len(os.Args) < 2 {
 		fatal("usage: ticket-worker <run|serve|import|version>")
 	}
@@ -283,6 +292,11 @@ func writeFile(path string, data []byte, perm os.FileMode) {
 }
 
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	message := fmt.Sprintf(format, args...)
+	reporting.ReportError(reporting.CodeWorkerFatal, errors.New(message))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = reporting.Flush(ctx)
+	cancel()
+	fmt.Fprintln(os.Stderr, message)
 	os.Exit(2)
 }

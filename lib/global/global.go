@@ -4,7 +4,15 @@ package global
 var (
 	GitCommit   = "Development"
 	BuildTime   = "-1"
+	Version     = "0.0.0"
 	LoggerLevel = "6"
+
+	// Reporting settings are injected at build time with -ldflags -X. All four
+	// values must be present and valid, otherwise the no-op reporter is used.
+	ReportDSN          = ""
+	ReportSalt         = ""
+	ReportTimeout      = ""
+	ReportSkipSSLCheck = ""
 
 	// Debug controls verbose debug output on both frontend and backend.
 	// When the `debug` build tag is active, this is set to true in debug_on.go.

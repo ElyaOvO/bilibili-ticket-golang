@@ -6,4 +6,5 @@ use (
 	./cmd/gui
 	./cmd/ticket-worker
 	./lib
+	./process
 )

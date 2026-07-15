@@ -10,6 +10,9 @@ const defaultRingCapacity = 1000
 // EmitFunc forwards a structured log event to an optional presentation layer.
 type EmitFunc func(event string, data any)
 
+// SinkFunc observes each ingested log entry without replacing the UI emitter.
+type SinkFunc func(entry LogEntry)
+
 // LogLevel represents the severity level of a log entry.
 type LogLevel string
 
@@ -84,6 +87,7 @@ func (rb *ringBuffer) clear() {
 // Logs are persisted to disk via LogStorage so they survive application restarts.
 type LogBroker struct {
 	emitter EmitFunc
+	sinks   []SinkFunc
 	mu      sync.RWMutex
 	rings   map[string]*ringBuffer
 	streams map[string]chan LogEntry
@@ -109,6 +113,16 @@ func (lb *LogBroker) SetEmitter(emitter EmitFunc) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	lb.emitter = emitter
+}
+
+// AddSink registers an additional real-time log consumer.
+func (lb *LogBroker) AddSink(sink SinkFunc) {
+	if sink == nil {
+		return
+	}
+	lb.mu.Lock()
+	lb.sinks = append(lb.sinks, sink)
+	lb.mu.Unlock()
 }
 
 // CreateStream returns a send-only channel that the task uses to emit logs.
@@ -185,9 +199,13 @@ func (lb *LogBroker) ingest(taskID string, entry LogEntry) {
 	// 3. Emit to frontend via Wails v3 event system.
 	lb.mu.RLock()
 	emitter := lb.emitter
+	sinks := append([]SinkFunc(nil), lb.sinks...)
 	lb.mu.RUnlock()
 	if emitter != nil {
 		emitter("ticket:log", entry)
+	}
+	for _, sink := range sinks {
+		sink(entry)
 	}
 }
 

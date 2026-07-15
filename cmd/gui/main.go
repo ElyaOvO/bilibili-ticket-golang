@@ -12,8 +12,10 @@ import (
 	"bilibili-ticket-golang/lib/global"
 	"bilibili-ticket-golang/lib/logfile"
 	"bilibili-ticket-golang/lib/notify"
+	"bilibili-ticket-golang/lib/reporting"
 	"bilibili-ticket-golang/lib/tasklog"
 	"bilibili-ticket-golang/lib/terminal"
+	"bilibili-ticket-golang/process"
 	"bytes"
 	"context"
 	"embed"
@@ -46,6 +48,17 @@ func main() {
 	if relaunched {
 		return
 	}
+	reporting.SetDefault(process.NewConfiguredReportClient(
+		global.ReportDSN,
+		global.ReportSalt,
+		global.ReportTimeout,
+		global.ReportSkipSSLCheck,
+	))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = reporting.Flush(ctx)
+	}()
 
 	consoleOut := os.Stdout
 	consoleErr := os.Stderr
@@ -175,6 +188,9 @@ func main() {
 	}
 
 	logBroker := tasklog.NewLogBroker(logStorage)
+	logBroker.AddSink(func(entry tasklog.LogEntry) {
+		reporting.ReportTaskLog(entry, 0)
+	})
 	logService := NewTaskLogService(logBroker)
 
 	// Build MultiNotifier from persisted notification channels
@@ -282,6 +298,7 @@ func main() {
 	})
 
 	if err = wailsApp.Run(); err != nil {
+		reporting.ReportError(reporting.CodeGUIRuntimeError, err)
 		log.Printf("[main] Error: %v", err)
 	}
 }

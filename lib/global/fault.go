@@ -1,6 +1,7 @@
 package global
 
 import (
+	"bilibili-ticket-golang/lib/reporting"
 	"encoding/json"
 	"fmt"
 	"runtime"
@@ -158,6 +159,7 @@ func MarshalError(err error) []byte {
 	if err == nil {
 		return []byte("null")
 	}
+	reporting.ReportError(reporting.CodeGUICallError, err)
 	if f := FaultFrom(err); f != nil {
 		data, marshalErr := f.MarshalJSON()
 		if marshalErr == nil {
