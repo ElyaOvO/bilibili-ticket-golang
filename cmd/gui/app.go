@@ -6,6 +6,7 @@ import (
 	"bilibili-ticket-golang/cmd/gui/store/configuration"
 	"bilibili-ticket-golang/lib/biliutils"
 	"bilibili-ticket-golang/lib/global"
+	"bilibili-ticket-golang/lib/reporting"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,6 +54,7 @@ func NewAppWithClientAndStore(c *biliutils.BiliClient, store *configuration.Data
 // display.  It returns a Fault with file:line, operation name, a simulated
 // underlying error, and a human-readable hint.
 func (a *App) TestFaultError() error {
+	reporting.ReportAction(reporting.ActionErrorReportTest)
 	return global.NewFault("测试错误报告功能",
 		fmt.Errorf("这是一个模拟的底层错误: 数据库连接超时"),
 		"这只是一个测试错误，用于验证 cause 字段是否正确显示文件:行号信息",
@@ -61,6 +63,7 @@ func (a *App) TestFaultError() error {
 
 // SetLocale sets the application locale and persists it.
 func (a *App) SetLocale(locale string) {
+	reporting.ReportAction(reporting.ActionAppLocaleUpdate)
 	i18n.SetLocale(locale)
 	if a.store != nil {
 		a.store.Locale = locale
@@ -81,6 +84,7 @@ func (a *App) SetApp(app *application.App) {
 
 // OpenQRTestWindow creates a new window with a test QR code.
 func (a *App) OpenQRTestWindow(text string) {
+	reporting.ReportAction(reporting.ActionAppQRTestOpen)
 	if a.wailsApp == nil {
 		return
 	}
@@ -107,6 +111,7 @@ type PayQRWindowOptions struct {
 
 // OpenPayQRWindow opens a compact QR-code payment window.
 func (a *App) OpenPayQRWindow(options PayQRWindowOptions) {
+	reporting.ReportAction(reporting.ActionAppPaymentQROpen)
 	if a.wailsApp == nil || options.Link == "" {
 		return
 	}
@@ -186,6 +191,7 @@ type CaptchaTestResult struct {
 // TestCaptchaSolver 从 Bilibili 获取真实验证码并测试求解器。
 // 返回 CaptchaTestResult 供前端展示。
 func (a *App) TestCaptchaSolver() CaptchaTestResult {
+	reporting.ReportAction(reporting.ActionCaptchaTest)
 	if a.captchaSolver == nil && !a.bili.HasCaptchaSolver() {
 		return CaptchaTestResult{Success: false, Error: "验证码求解器未安装"}
 	}

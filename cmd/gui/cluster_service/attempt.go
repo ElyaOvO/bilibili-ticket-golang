@@ -7,6 +7,7 @@ import (
 
 	"bilibili-ticket-golang/cluster/domain"
 	clusterworker "bilibili-ticket-golang/cluster/worker"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // AttemptLogs retrieves log entries for a specific execution attempt.
@@ -71,6 +72,7 @@ func (s *ClusterService) AttemptLogs(attemptID string) ([]clusterworker.LogEntry
 // from the database and cleans up their local log cache files.
 // Running or queued attempts are silently kept.
 func (s *ClusterService) DeleteTerminalAttempts(attemptIDs []string) error {
+	reportAction(reporting.ActionAttemptDeleteTerminal)
 	if err := s.repository.DeleteAttempts(context.Background(), attemptIDs); err != nil {
 		return err
 	}

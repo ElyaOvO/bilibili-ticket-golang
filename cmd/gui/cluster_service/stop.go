@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // StopAttempt stops a running attempt by telling its worker to cancel it.
 func (s *ClusterService) StopAttempt(attemptID string) error {
+	reportAction(reporting.ActionAttemptStop)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	workerList, err := s.repository.ListWorkers(ctx)
@@ -45,6 +47,7 @@ func (s *ClusterService) StopMacro(macroID string) error {
 // StopTaskGroup stops all active attempts belonging to a task group, disarms
 // its intents, and releases the workers reserved by the task group.
 func (s *ClusterService) StopTaskGroup(taskGroupID string) error {
+	reportAction(reporting.ActionTaskGroupStop)
 	s.cancelTaskGroupWave(taskGroupID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -55,6 +58,11 @@ func (s *ClusterService) StopTaskGroup(taskGroupID string) error {
 // task group is marked as active.  It also force-resets all macros so that
 // the group can be re-run after a successful order.
 func (s *ClusterService) ForceStopTaskGroup(taskGroupID string) error {
+	reportAction(reporting.ActionTaskGroupForceStop)
+	return s.forceStopTaskGroup(taskGroupID)
+}
+
+func (s *ClusterService) forceStopTaskGroup(taskGroupID string) error {
 	s.cancelTaskGroupWave(taskGroupID)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -77,7 +85,8 @@ func (s *ClusterService) ForceStopTaskGroup(taskGroupID string) error {
 // ForceRestartTaskGroup force-stops a task group, resets all macros, and
 // immediately re-plans and starts the task group with the given workers.
 func (s *ClusterService) ForceRestartTaskGroup(taskGroupID string, workerIDsJSON string) error {
-	if err := s.ForceStopTaskGroup(taskGroupID); err != nil {
+	reportAction(reporting.ActionTaskGroupForceRestart)
+	if err := s.forceStopTaskGroup(taskGroupID); err != nil {
 		return fmt.Errorf("force stop: %w", err)
 	}
 	// Stop now retains Attempt tombstones until the worker confirms a terminal
@@ -109,7 +118,7 @@ func (s *ClusterService) ForceRestartTaskGroup(taskGroupID string, workerIDsJSON
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return s.StartTaskGroup(taskGroupID, workerIDsJSON)
+	return s.startTaskGroupPhase(taskGroupID, domain.PhasePunctual, false, workerIDsJSON)
 }
 
 func (s *ClusterService) stopTaskGroupInternal(ctx context.Context, taskGroupID string) error {

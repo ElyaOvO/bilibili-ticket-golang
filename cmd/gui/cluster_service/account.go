@@ -3,16 +3,19 @@ package cluster_service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 
 	accountsmgr "bilibili-ticket-golang/cluster/accounts"
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // SetAccountTags updates user-managed tags for an account.
 func (s *ClusterService) SetAccountTags(accountID string, tagsJSON string) error {
+	reportAction(reporting.ActionAccountTagsUpdate)
 	var tags []string
 	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
 		return err
@@ -32,6 +35,7 @@ func (s *ClusterService) SetAccountTags(accountID string, tagsJSON string) error
 
 // ImportAccount imports an account from an encoded credential document.
 func (s *ClusterService) ImportAccount(document string) error {
+	reportAction(reporting.ActionAccountImport)
 	_, err := s.accounts.ImportMany(context.Background(), []byte(document))
 	if err == nil {
 		err = s.refreshResources(context.Background())
@@ -42,6 +46,7 @@ func (s *ClusterService) ImportAccount(document string) error {
 // ExportAccounts exports selected accounts as JSON compatible with ImportAccount.
 // accountIDsJSON must be a JSON string array.
 func (s *ClusterService) ExportAccounts(accountIDsJSON string) (string, error) {
+	reportAction(reporting.ActionAccountExport)
 	var accountIDs []string
 	if err := json.Unmarshal([]byte(accountIDsJSON), &accountIDs); err != nil {
 		return "", err
@@ -77,6 +82,7 @@ func (s *ClusterService) ExportAccounts(accountIDsJSON string) (string, error) {
 // RefreshAccountsStatus refreshes login/VIP/cookie status for selected accounts
 // using the same Bilibili API checks used during startup.
 func (s *ClusterService) RefreshAccountsStatus(accountIDsJSON string) error {
+	reportAction(reporting.ActionAccountStatusRefresh)
 	var accountIDs []string
 	if err := json.Unmarshal([]byte(accountIDsJSON), &accountIDs); err != nil {
 		return err
@@ -104,6 +110,7 @@ func (s *ClusterService) RefreshAccountsStatus(accountIDsJSON string) error {
 // SyncAccountBuyers synchronizes buyers from a single account into the
 // logical buyer pool, deduplicating by real-name identity.
 func (s *ClusterService) SyncAccountBuyers(accountID string) ([]domain.Buyer, error) {
+	reportAction(reporting.ActionAccountBuyersSync)
 	buyers, err := s.accounts.SyncBuyers(context.Background(), accountID)
 	if err != nil {
 		return nil, err
@@ -119,6 +126,7 @@ func (s *ClusterService) SyncAccountBuyers(accountID string) ([]domain.Buyer, er
 // information. The same real person on multiple accounts is matched and
 // deduplicated into a single logical buyer entry.
 func (s *ClusterService) SyncAllAccountBuyers() ([]domain.Buyer, error) {
+	reportAction(reporting.ActionAccountBuyersSyncAll)
 	buyers, err := s.accounts.SyncAllBuyers(context.Background())
 	if err != nil {
 		return nil, err
@@ -134,6 +142,7 @@ func (s *ClusterService) SyncAllAccountBuyers() ([]domain.Buyer, error) {
 // account, deduplicated, and GetBuyerSensitiveData is called exactly once
 // per unique logical buyer (with fallback accounts on failure).
 func (s *ClusterService) SyncAllAccountBuyersFast() ([]domain.Buyer, error) {
+	reportAction(reporting.ActionAccountBuyersSyncAllFast)
 	ctx := context.Background()
 	buyers, err := s.accounts.SyncAllBuyersFast(ctx)
 	if err != nil {
@@ -149,6 +158,7 @@ func (s *ClusterService) SyncAllAccountBuyersFast() ([]domain.Buyer, error) {
 // The default value shown to the user is the Tel currently stored in
 // the database.  The phone is also added to Tels if it is new.
 func (s *ClusterService) UpdateBuyerPhone(logicalBuyerID, phone string) (domain.Buyer, error) {
+	reportAction(reporting.ActionAccountBuyerPhoneUpdate)
 	buyer, err := s.accounts.SetBuyerPhone(context.Background(), logicalBuyerID, phone)
 	if err != nil {
 		return domain.Buyer{}, err
@@ -163,6 +173,7 @@ func (s *ClusterService) UpdateBuyerPhone(logicalBuyerID, phone string) (domain.
 // RemoveBuyerFromAccount deletes the buyer mapping for a specific account
 // and removes the buyer from the Bilibili account's real-name list.
 func (s *ClusterService) RemoveBuyerFromAccount(logicalBuyerID, accountID string) error {
+	reportAction(reporting.ActionAccountBuyerRemove)
 	if err := s.accounts.RemoveBuyerFromAccount(context.Background(), logicalBuyerID, accountID); err != nil {
 		return err
 	}
@@ -172,6 +183,7 @@ func (s *ClusterService) RemoveBuyerFromAccount(logicalBuyerID, accountID string
 // RemoveBuyerFromAllAccounts removes the buyer from every mapped Bilibili
 // account and deletes the logical buyer record.
 func (s *ClusterService) RemoveBuyerFromAllAccounts(logicalBuyerID string) error {
+	reportAction(reporting.ActionAccountBuyerRemoveAll)
 	if err := s.accounts.RemoveBuyerFromAllAccounts(context.Background(), logicalBuyerID); err != nil {
 		return err
 	}
@@ -180,6 +192,7 @@ func (s *ClusterService) RemoveBuyerFromAllAccounts(logicalBuyerID string) error
 
 // DeleteAccount removes an account. The account must not have active attempts.
 func (s *ClusterService) DeleteAccount(accountID string) error {
+	reportAction(reporting.ActionAccountDelete)
 	for _, attempt := range s.dispatcher.Attempts() {
 		if attempt.AccountID == accountID && !attempt.State.Terminal() {
 			return fmt.Errorf("account is used by active attempt %s", attempt.ID)
@@ -228,6 +241,7 @@ func (s *ClusterService) refreshAccountStatus(ctx context.Context, accountID str
 	}
 	client, jar, err := accountClient(account)
 	if err != nil {
+		reportBiliError(reporting.CodeBiliClientInitFailed, "account.status.initialize", err)
 		return accountStatusRefreshResult{}, err
 	}
 	client.SetRefreshToken(account.Credentials.RefreshToken)
@@ -235,13 +249,20 @@ func (s *ClusterService) refreshAccountStatus(ctx context.Context, accountID str
 	loginInfo, statusErr := client.GetAccountStatus()
 	if statusErr != nil || loginInfo == nil || !loginInfo.Login || loginInfo.UID == 0 {
 		reason := "api error"
+		reportErr := statusErr
 		if statusErr != nil {
 			reason = statusErr.Error()
 		} else if loginInfo == nil {
 			reason = "nil response"
+			reportErr = errors.New(reason)
 		} else if !loginInfo.Login {
 			reason = "not logged in"
+			reportErr = errors.New(reason)
+		} else {
+			reason = "invalid uid"
+			reportErr = errors.New(reason)
 		}
+		reportBiliError(reporting.CodeBiliAccountStatusFailed, "account.status.refresh", reportErr)
 		log.Printf("[cluster] account %s (%s) login check failed: %s — disabling", account.ID, account.Name, reason)
 		account.Enabled = false
 		account.Credentials.Version++
@@ -271,6 +292,7 @@ func (s *ClusterService) refreshAccountStatus(ctx context.Context, accountID str
 	result := accountStatusRefreshResult{}
 	refreshed, refreshErr := client.CheckAndUpdateCookie()
 	if refreshErr != nil {
+		reportBiliError(reporting.CodeBiliCookieRefreshFailed, "account.cookie.refresh", refreshErr)
 		log.Printf("[cluster] cookie refresh for account %s: %v", account.ID, refreshErr)
 	} else if refreshed {
 		updated := credentialsFrom(client, jar, account.Credentials)

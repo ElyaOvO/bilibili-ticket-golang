@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // SaveTaskGroup persists a task group (create or update).
 func (s *ClusterService) SaveTaskGroup(document string) error {
+	reportAction(reporting.ActionTaskGroupSave)
 	var value domain.TaskGroup
 	if err := json.Unmarshal([]byte(document), &value); err != nil {
 		return err
@@ -121,6 +123,7 @@ func (s *ClusterService) taskGroupActive(ctx context.Context, taskGroupID string
 
 // DeleteTaskGroup removes a task group by ID.
 func (s *ClusterService) DeleteTaskGroup(id string) error {
+	reportAction(reporting.ActionTaskGroupDelete)
 	if s.taskGroupActive(context.Background(), id) {
 		return fmt.Errorf("task group cannot be deleted while it is running")
 	}

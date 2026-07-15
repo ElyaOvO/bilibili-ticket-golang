@@ -16,12 +16,14 @@ import (
 	"bilibili-ticket-golang/cluster/employer"
 	clusterworker "bilibili-ticket-golang/cluster/worker"
 	"bilibili-ticket-golang/lib/global"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // SetWorkerTags updates user-managed tags for any worker.  The system
 // local/remote tag is derived from WorkerNode.Type and is never persisted as a
 // user tag.
 func (s *ClusterService) SetWorkerTags(workerID string, tagsJSON string) error {
+	reportAction(reporting.ActionWorkerTagsUpdate)
 	var tags []string
 	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
 		return err
@@ -40,6 +42,7 @@ func (s *ClusterService) SetWorkerTags(workerID string, tagsJSON string) error {
 
 // AddWorker registers a new remote worker and verifies connectivity.
 func (s *ClusterService) AddWorker(document string) error {
+	reportAction(reporting.ActionWorkerAdd)
 	var input struct {
 		ID            string `json:"id"`
 		Name          string `json:"name"`
@@ -112,6 +115,7 @@ func (s *ClusterService) AddWorker(document string) error {
 // existing worker. The worker must not have active attempts. Accepts the
 // same JSON document shape as AddWorker.
 func (s *ClusterService) UpdateWorker(document string) error {
+	reportAction(reporting.ActionWorkerUpdate)
 	var input struct {
 		ID            string   `json:"id"`
 		Name          string   `json:"name"`
@@ -219,6 +223,7 @@ func (s *ClusterService) UpdateWorker(document string) error {
 // The primary "local" worker is automatically managed — callers must not
 // attempt to create it manually.
 func (s *ClusterService) AddLocalWorker(id, name, listen string) error {
+	reportAction(reporting.ActionWorkerLocalAdd)
 	if id == "local" {
 		return fmt.Errorf("the local worker is automatically managed and cannot be added manually")
 	}
@@ -251,6 +256,7 @@ func (s *ClusterService) AddLocalWorker(id, name, listen string) error {
 // If the worker was stopped with an older version that removed the slot,
 // this falls back to AddWorker using the node data stored in the repository.
 func (s *ClusterService) StartLocalWorker(workerID string) error {
+	reportAction(reporting.ActionWorkerLocalStart)
 	ctx := context.Background()
 	pluginName := ""
 	opts := employer.LocalWorkerOptions{
@@ -292,6 +298,7 @@ func (s *ClusterService) StartLocalWorker(workerID string) error {
 // immediately so IsHealthy returns false right away.
 // The primary "local" worker can never be stopped.
 func (s *ClusterService) StopLocalWorker(workerID string) error {
+	reportAction(reporting.ActionWorkerLocalStop)
 	if workerID == "local" {
 		return fmt.Errorf("the local worker cannot be stopped")
 	}
@@ -341,6 +348,7 @@ func (s *ClusterService) GetWorkerConfig(workerID string) (WorkerConfigResponse,
 
 // DeleteWorker removes a worker. Local workers are stopped first.
 func (s *ClusterService) DeleteWorker(workerID string) error {
+	reportAction(reporting.ActionWorkerDelete)
 	if workerID == "local" {
 		return fmt.Errorf("the automatically managed local worker cannot be deleted")
 	}
@@ -361,6 +369,7 @@ func (s *ClusterService) DeleteWorker(workerID string) error {
 // DisconnectWorker closes the gRPC connection to a worker (keeping the TLS
 // config so it can be reconnected later).
 func (s *ClusterService) DisconnectWorker(workerID string) error {
+	reportAction(reporting.ActionWorkerDisconnect)
 	if workerID == "local" {
 		return fmt.Errorf("the local worker cannot be disconnected")
 	}
@@ -371,6 +380,7 @@ func (s *ClusterService) DisconnectWorker(workerID string) error {
 // ReconnectWorker re-establishes the gRPC connection to a worker and verifies
 // it with a health check.  Retries up to 5 times with 5s intervals.
 func (s *ClusterService) ReconnectWorker(workerID string) error {
+	reportAction(reporting.ActionWorkerReconnect)
 	if workerID == "local" {
 		return fmt.Errorf("the local worker is auto-managed")
 	}
@@ -406,6 +416,7 @@ func (s *ClusterService) ReconnectWorker(workerID string) error {
 // the worker, and persists SkipVersionCheck=true so future Health calls
 // also skip the check.
 func (s *ClusterService) ForceReconnectWorker(workerID string) error {
+	reportAction(reporting.ActionWorkerForceReconnect)
 	if workerID == "local" {
 		return fmt.Errorf("the local worker is auto-managed")
 	}
@@ -456,6 +467,7 @@ type GenerateRemoteWorkerConfigResponse struct {
 //   - hosts: comma-separated list of DNS names / IPs for the server TLS cert
 //     (e.g. "myworker.example.com,192.168.1.100")
 func (s *ClusterService) GenerateRemoteWorkerConfig(workerID, listen, hosts string) (GenerateRemoteWorkerConfigResponse, error) {
+	reportAction(reporting.ActionWorkerConfigGenerate)
 	if workerID == "" {
 		return GenerateRemoteWorkerConfigResponse{}, fmt.Errorf("workerId is required")
 	}
@@ -551,6 +563,7 @@ func (s *ClusterService) GenerateRemoteWorkerConfig(workerID, listen, hosts stri
 // address the worker was configured with (e.g. 0.0.0.0:37900 vs the actual
 // public IP).
 func (s *ClusterService) AddWorkerFromEncodedConfig(encodedConfig string, overrideAddress string) error {
+	reportAction(reporting.ActionWorkerConfigImport)
 	rc, err := clusterworker.DecodeRemoteWorkerConfig(encodedConfig)
 	if err != nil {
 		return fmt.Errorf("decode worker config: %w", err)
@@ -653,6 +666,7 @@ func (s *ClusterService) AddWorkerFromEncodedConfig(encodedConfig string, overri
 // except it bypasses the protocol version check by calling HealthForce.
 // Use only when the user has explicitly acknowledged the version mismatch.
 func (s *ClusterService) ForceAddWorkerFromEncodedConfig(encodedConfig string, overrideAddress string) error {
+	reportAction(reporting.ActionWorkerConfigForceImport)
 	rc, err := clusterworker.DecodeRemoteWorkerConfig(encodedConfig)
 	if err != nil {
 		return fmt.Errorf("decode worker config: %w", err)
@@ -744,6 +758,7 @@ func (s *ClusterService) ForceAddWorkerFromEncodedConfig(encodedConfig string, o
 
 // TestWorkerCaptcha 通过 gRPC 要求指定 worker 获取真实 Bilibili 验证码并求解。
 func (s *ClusterService) TestWorkerCaptcha(workerID string) employer.TestCaptchaResult {
+	reportAction(reporting.ActionWorkerCaptchaTest)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -761,6 +776,7 @@ func (s *ClusterService) TestWorkerCaptcha(workerID string) employer.TestCaptcha
 
 // TestAllWorkersCaptcha 对所有远程 worker 执行验证码测试，汇总结果。
 func (s *ClusterService) TestAllWorkersCaptcha() []employer.TestCaptchaResult {
+	reportAction(reporting.ActionWorkerCaptchaTestAll)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

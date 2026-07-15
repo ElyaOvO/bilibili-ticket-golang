@@ -4,7 +4,7 @@ import { parse } from '@/utils/announcementParser'
 import { MIRRORS, resolveMirrorUrl, mirrorSelectOptions, MIRROR_KEYS } from '@/composables/mirrors'
 
 /** Remote primary URL for announcements. */
-const PRIMARY_URL = 'https://raw.githubusercontent.com/firefly001988/btg-announcements/refs/heads/main/announcement.txt'
+const PRIMARY_URL = 'https://raw.githubusercontent.com/It-s-bilibili-ticket-golang/btg-announcements/refs/heads/main/announcement.txt'
 
 /** Key for localStorage raw-text cache. */
 const CACHE_KEY = 'announcement.cachedRaw'

@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // Backend owns the Bilibili prepare/confirm/createV2 transaction. Backends that
@@ -91,11 +94,64 @@ func (realClock) Sleep(ctx context.Context, d time.Duration) error {
 }
 
 type Engine struct {
-	Backend          Backend
-	Classifier       Classifier
-	Clock            Clock
-	Observe          func(Event)
-	GetRetryInterval func() int64 // optional: dynamic retry interval (ms), checked each loop iteration
+	Backend           Backend
+	Classifier        Classifier
+	Clock             Clock
+	Observe           func(Event)
+	ReportError       func(ErrorEvent)
+	ErrorOperation    string
+	AttemptErrorCode  string
+	RetryErrorCode    string
+	UpstreamNamespace string
+	GetRetryInterval  func() int64 // optional: dynamic retry interval (ms), checked each loop iteration
+}
+
+// ErrorEvent is emitted only at a terminal business boundary. Individual
+// retry attempts remain normal task logs so transient failures cannot flood
+// remote error reporting.
+type ErrorEvent struct {
+	Code      string
+	Operation string
+	Err       error
+}
+
+// OutcomeError turns an upstream numeric failure into a structured error even
+// when the backend returned only Outcome.Code and no Go error.
+type OutcomeError struct {
+	Namespace string
+	Code      int
+	Message   string
+	Retryable bool
+	Cause     error
+}
+
+func (e *OutcomeError) Error() string {
+	message := strings.TrimSpace(e.Message)
+	if message == "" {
+		message = "upstream request failed"
+	}
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: code=%d: %v", message, e.Code, e.Cause)
+	}
+	return fmt.Sprintf("%s: code=%d", message, e.Code)
+}
+
+func (e *OutcomeError) Unwrap() error { return e.Cause }
+func (e *OutcomeError) TelemetryCode() string {
+	return strings.ToUpper(e.Namespace) + "_API_" + telemetryNumericCode(e.Code)
+}
+func (e *OutcomeError) TelemetryCategory() string { return "upstream" }
+func (e *OutcomeError) TelemetryMessage() string  { return "upstream API rejected the request" }
+func (e *OutcomeError) TelemetryRetryable() bool  { return e.Retryable }
+func (e *OutcomeError) TelemetryUpstreamCode() (int, bool) {
+	return e.Code, true
+}
+
+func telemetryNumericCode(code int) string {
+	if code < 0 {
+		return "NEG_" + strconv.Itoa(-code)
+	}
+	return strconv.Itoa(code)
 }
 
 type Event struct {
@@ -127,6 +183,22 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 			e.Observe(Event{Time: now(), Stage: stage, Message: message, Code: code, Retryable: retryable, CooldownEnd: cooldownEnd})
 		}
 	}
+	reportError := func(code string, err error) {
+		if err == nil || e.ReportError == nil {
+			return
+		}
+		operation := e.ErrorOperation
+		if operation == "" {
+			operation = "executor.attempt"
+		}
+		e.ReportError(ErrorEvent{Code: code, Operation: operation, Err: err})
+	}
+	configuredCode := func(configured, fallback string) string {
+		if code := strings.TrimSpace(configured); code != "" {
+			return code
+		}
+		return fallback
+	}
 	result := domain.ExecutionResult{AttemptID: spec.AttemptID, IntentID: spec.IntentID, SpecHash: spec.Hash(), State: domain.AttemptRunning, StartedAt: now()}
 	finish := func(state domain.AttemptState, reason domain.FailureReason, message string, retryable bool) domain.ExecutionResult {
 		if state != domain.AttemptSucceeded && result.Partial {
@@ -140,10 +212,13 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 		return result
 	}
 	if err := spec.Validate(); err != nil {
+		reportError(reporting.CodeExecutorSpecInvalid, err)
 		return finish(domain.AttemptFailed, domain.FailureInternal, err.Error(), false)
 	}
 	if e.Backend == nil {
-		return finish(domain.AttemptFailed, domain.FailureInternal, "executor backend is required", false)
+		err := errors.New("executor backend is required")
+		reportError(reporting.CodeExecutorBackendMissing, err)
+		return finish(domain.AttemptFailed, domain.FailureInternal, err.Error(), false)
 	}
 	if !spec.Deadline.After(now()) {
 		return finish(domain.AttemptFailed, domain.FailureDeadline, "deadline elapsed", false)
@@ -163,6 +238,7 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 		}
 	}
 
+	var lastAttemptErr error
 	for {
 		// Resolve the retry interval dynamically — if the caller provided
 		// a GetRetryInterval hook, it is checked on every loop iteration
@@ -181,6 +257,7 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 			return finish(domain.AttemptStopped, domain.FailureStopped, err.Error(), false)
 		}
 		if !spec.Deadline.After(now()) {
+			reportError(configuredCode(e.RetryErrorCode, reporting.CodeExecutorRetryExhausted), lastAttemptErr)
 			return finish(domain.AttemptFailed, domain.FailureDeadline, "deadline elapsed", false)
 		}
 		emit("request", "starting purchase API transaction", 0, false)
@@ -190,6 +267,20 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 			result.Partial = hasPartialSuccess(result.SubOrders)
 		}
 		classification := e.Classifier.Classify(outcome)
+		attemptErr := outcome.Err
+		if outcome.Code != 0 && e.UpstreamNamespace != "" &&
+			(attemptErr == nil || (outcome.Code != -1 && outcome.Code != -999)) {
+			attemptErr = &OutcomeError{
+				Namespace: e.UpstreamNamespace,
+				Code:      outcome.Code,
+				Message:   outcome.Message,
+				Retryable: classification.Retryable,
+				Cause:     outcome.Err,
+			}
+		}
+		if attemptErr != nil {
+			lastAttemptErr = attemptErr
+		}
 		message := outcome.Message
 		if outcome.Err != nil {
 			if message != "" {
@@ -209,6 +300,7 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 			return finish(domain.AttemptSucceeded, domain.FailureNone, outcome.Message, false)
 		}
 		if !classification.Retryable {
+			reportError(configuredCode(e.AttemptErrorCode, reporting.CodeExecutorAttemptFailed), attemptErr)
 			message := outcome.Message
 			if message == "" && outcome.Err != nil {
 				message = outcome.Err.Error()

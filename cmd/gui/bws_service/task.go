@@ -1,13 +1,15 @@
 package bws_service
 
 import (
-	"bilibili-ticket-golang/cmd/gui/i18n"
-	"bilibili-ticket-golang/cmd/gui/store/configuration"
-	"bilibili-ticket-golang/lib/biliutils"
 	"context"
 	"fmt"
 	"sync"
 	"time"
+
+	"bilibili-ticket-golang/cmd/gui/i18n"
+	"bilibili-ticket-golang/cmd/gui/store/configuration"
+	"bilibili-ticket-golang/lib/biliutils"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // BWSTask implements ITask for BWS (Bilibili World) activity reservation.
@@ -228,8 +230,11 @@ func (t *BWSTask) setError(err error) {
 	t.taskErr = err
 	t.statLock.Unlock()
 	t.cancelFunc()
-	if !wasTerminal && t.onComplete != nil {
-		t.onComplete(StatError, t.userStopped)
+	if !wasTerminal {
+		reporting.ReportErrorOp(reporting.CodeBWSReservationFailed, "bws.reserve", err)
+		if t.onComplete != nil {
+			t.onComplete(StatError, t.userStopped)
+		}
 	}
 }
 

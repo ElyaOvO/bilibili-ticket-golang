@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"bilibili-ticket-golang/lib/reporting"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -88,6 +90,7 @@ type RemoteWorkerDeployItemStatus struct {
 }
 
 func (s *ClusterService) SelectWorkerBinary() (string, error) {
+	reportAction(reporting.ActionWorkerDeployBinarySelect)
 	if s.wailsApp == nil || s.wailsApp.Dialog == nil {
 		return "", fmt.Errorf("file dialog is not available")
 	}
@@ -99,6 +102,7 @@ func (s *ClusterService) SelectWorkerBinary() (string, error) {
 }
 
 func (s *ClusterService) StartBatchDeployRemoteWorkers(document string) (string, error) {
+	reportAction(reporting.ActionWorkerDeployStart)
 	var req RemoteWorkerDeployRequest
 	if err := json.Unmarshal([]byte(document), &req); err != nil {
 		return "", err
@@ -156,6 +160,7 @@ func (s *ClusterService) GetRemoteWorkerDeployJob(jobID string) (RemoteWorkerDep
 }
 
 func (s *ClusterService) CancelRemoteWorkerDeployJob(jobID string) error {
+	reportAction(reporting.ActionWorkerDeployCancel)
 	s.deployMu.RLock()
 	job, ok := s.deployJobs[jobID]
 	var cancel context.CancelFunc

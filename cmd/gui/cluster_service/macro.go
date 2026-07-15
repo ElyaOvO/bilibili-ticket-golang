@@ -16,6 +16,7 @@ import (
 	"bilibili-ticket-golang/cluster/domain"
 	"bilibili-ticket-golang/cluster/planner"
 	"bilibili-ticket-golang/lib/global"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 const startTaskGroupReflowNowToken = "__cluster_reflow_now__"
@@ -68,6 +69,7 @@ func (d purchaseGroupDocument) domainValue() domain.PurchaseGroup {
 // SaveMacro persists a macro task (create or update). Validates the
 // execution window and capacity constraints.
 func (s *ClusterService) SaveMacro(document string) error {
+	reportAction(reporting.ActionMacroSave)
 	var value domain.MacroTask
 	if err := json.Unmarshal([]byte(document), &value); err != nil {
 		return err
@@ -102,6 +104,7 @@ func (s *ClusterService) SaveMacro(document string) error {
 
 // DeleteMacro removes a macro task and cascades to intents/attempts.
 func (s *ClusterService) DeleteMacro(macroID string) error {
+	reportAction(reporting.ActionMacroDelete)
 	ctx := context.Background()
 	macros, err := s.repository.ListMacroTasks(ctx)
 	if err != nil {
@@ -129,6 +132,7 @@ func (s *ClusterService) DeleteMacro(macroID string) error {
 
 // SavePurchaseGroup persists a purchase group (create or update).
 func (s *ClusterService) SavePurchaseGroup(document string) error {
+	reportAction(reporting.ActionPurchaseGroupSave)
 	var input purchaseGroupDocument
 	if err := json.Unmarshal([]byte(document), &input); err != nil {
 		return err
@@ -198,6 +202,7 @@ func (s *ClusterService) SavePurchaseGroup(document string) error {
 
 // DeletePurchaseGroup removes a purchase group from a macro.
 func (s *ClusterService) DeletePurchaseGroup(macroID, purchaseGroupID string) error {
+	reportAction(reporting.ActionPurchaseGroupDelete)
 	ctx := context.Background()
 	if strings.TrimSpace(macroID) == "" || strings.TrimSpace(purchaseGroupID) == "" {
 		return fmt.Errorf("macroId and purchaseGroupId are required")
@@ -248,6 +253,7 @@ func (s *ClusterService) StartMacro(macroID string) error {
 // compatibility path used by the frontend to start the reflow phase
 // immediately without adding a new Wails binding.
 func (s *ClusterService) StartTaskGroup(taskGroupID string, workerIDsJSON string) error {
+	reportAction(reporting.ActionTaskGroupStart)
 	if workerIDsJSON == startTaskGroupReflowNowToken {
 		return s.startTaskGroupPhase(taskGroupID, domain.PhaseReflow, true, "")
 	}
@@ -613,6 +619,7 @@ func (s *ClusterService) planMacro(ctx context.Context, macroID string, phase do
 // already succeeded are skipped (not re-dispatched).  Callers should
 // ensure workers are reserved before calling this.
 func (s *ClusterService) RestartMacro(macroID string) error {
+	reportAction(reporting.ActionMacroRestart)
 	ctx := context.Background()
 	if err := s.repository.ForceResetMacroExecution(ctx, macroID); err != nil {
 		return err
@@ -629,6 +636,7 @@ func (s *ClusterService) RestartMacro(macroID string) error {
 
 // StopIntent stops all active attempts belonging to a single intent.
 func (s *ClusterService) StopIntent(intentID string) error {
+	reportAction(reporting.ActionIntentStop)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	workerList, err := s.repository.ListWorkers(ctx)
@@ -657,6 +665,7 @@ func (s *ClusterService) StopIntent(intentID string) error {
 // groups' intents remain untouched.  Already-succeeded intents from this
 // group are overwritten (upsert) so they can be re-dispatched.
 func (s *ClusterService) StartPurchaseGroup(macroID, purchaseGroupID string) error {
+	reportAction(reporting.ActionPurchaseGroupStart)
 	ctx := context.Background()
 
 	if s.dispatcher.MacroActive(macroID) {
@@ -716,6 +725,7 @@ func (s *ClusterService) StartPurchaseGroup(macroID, purchaseGroupID string) err
 // SwitchToReflow transitions all punctual intents to the reflow phase,
 // stopping active punctual attempts and re-planning with relaxed constraints.
 func (s *ClusterService) SwitchToReflow() error {
+	reportAction(reporting.ActionExecutionSwitchReflow)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	if err := s.dispatcher.SwitchToReflow(ctx); err != nil {

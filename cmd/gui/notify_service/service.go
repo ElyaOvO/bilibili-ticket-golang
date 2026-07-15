@@ -8,6 +8,7 @@ import (
 	"bilibili-ticket-golang/cmd/gui/i18n"
 	"bilibili-ticket-golang/cmd/gui/store/configuration"
 	"bilibili-ticket-golang/lib/notify"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // FrontendNotifyChannel mirrors configuration.NotifyChannel for Wails.
@@ -69,6 +70,7 @@ func (svc *NotifyService) GetNotifyChannels() []FrontendNotifyChannel {
 }
 
 func (svc *NotifyService) AddNotifyChannel(ch FrontendNotifyChannel) (int, error) {
+	reporting.ReportAction(reporting.ActionNotifyChannelAdd)
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	nc := configuration.NotifyChannel{Type: ch.Type, Name: ch.Name, Enabled: ch.Enabled, Params: ch.Params}
@@ -83,6 +85,7 @@ func (svc *NotifyService) AddNotifyChannel(ch FrontendNotifyChannel) (int, error
 }
 
 func (svc *NotifyService) RemoveNotifyChannel(index int) error {
+	reporting.ReportAction(reporting.ActionNotifyChannelRemove)
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	if !svc.data.Remove(index) {
@@ -94,6 +97,7 @@ func (svc *NotifyService) RemoveNotifyChannel(index int) error {
 }
 
 func (svc *NotifyService) UpdateNotifyChannel(index int, ch FrontendNotifyChannel) error {
+	reporting.ReportAction(reporting.ActionNotifyChannelUpdate)
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	nc := configuration.NotifyChannel{Type: ch.Type, Name: ch.Name, Enabled: ch.Enabled, Params: ch.Params}
@@ -109,6 +113,7 @@ func (svc *NotifyService) UpdateNotifyChannel(index int, ch FrontendNotifyChanne
 }
 
 func (svc *NotifyService) TestNotifyChannel(index int) error {
+	reporting.ReportAction(reporting.ActionNotifyChannelTest)
 	channels := svc.data.GetAll()
 	if index < 0 || index >= len(channels) {
 		return errors.New(i18n.T("notify.error.index_not_found", map[string]interface{}{"Index": index}))

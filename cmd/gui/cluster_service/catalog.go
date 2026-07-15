@@ -11,6 +11,7 @@ import (
 	"bilibili-ticket-golang/cluster/domain"
 	"bilibili-ticket-golang/cmd/gui/store/cookiejar"
 	"bilibili-ticket-golang/lib/biliutils"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // SetCatalogClient assigns the employer UI's own Bilibili client for
@@ -36,6 +37,7 @@ func (s *ClusterService) SyncMainAccount() error {
 	}
 	info, err := s.catalog.GetAccountStatus()
 	if err != nil {
+		reportBiliError(reporting.CodeBiliAccountStatusFailed, "account.main.status.query", err)
 		return err
 	}
 	if info == nil || !info.Login || info.UID == 0 {
@@ -105,6 +107,7 @@ type CatalogSKU struct {
 
 // LoadProject fetches a project catalog from Bilibili for frontend display.
 func (s *ClusterService) LoadProject(projectID string) (ProjectCatalog, error) {
+	reportAction(reporting.ActionCatalogProjectLoad)
 	if s.catalog == nil {
 		return ProjectCatalog{}, fmt.Errorf("catalog client is unavailable")
 	}
@@ -114,10 +117,12 @@ func (s *ClusterService) LoadProject(projectID string) (ProjectCatalog, error) {
 	}
 	info, err := s.catalog.GetProjectInformationNew(projectID)
 	if err != nil {
+		reportBiliError(reporting.CodeBiliCatalogFailed, "catalog.project.query", err)
 		return ProjectCatalog{}, err
 	}
 	tickets, err := s.catalog.GetTicketSkuIDsByProjectIDNew(projectID)
 	if err != nil {
+		reportBiliError(reporting.CodeBiliCatalogFailed, "catalog.sku.list", err)
 		return ProjectCatalog{}, err
 	}
 	result := ProjectCatalog{ID: info.ProjectID, Name: info.ProjectName, ForceRealName: info.IsForceRealName, IDBind: info.IDBind, Start: info.StartTime, End: info.EndTime}
@@ -135,11 +140,13 @@ func (s *ClusterService) LoadProject(projectID string) (ProjectCatalog, error) {
 // for a specific (project, screen, SKU) triple so the frontend can
 // auto-fill macro metadata.
 func (s *ClusterService) InspectSKU(projectID, screenID, skuID int64) (SKUInspection, error) {
+	reportAction(reporting.ActionCatalogSKUInspect)
 	if s.catalog == nil {
 		return SKUInspection{}, fmt.Errorf("catalog client is unavailable")
 	}
 	items, err := s.catalog.GetTicketSkuIDsByProjectIDNew(fmt.Sprint(projectID))
 	if err != nil {
+		reportBiliError(reporting.CodeBiliCatalogFailed, "catalog.sku.inspect", err)
 		return SKUInspection{}, err
 	}
 	for _, item := range items {

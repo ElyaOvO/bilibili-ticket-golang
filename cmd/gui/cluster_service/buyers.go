@@ -16,12 +16,14 @@ import (
 	"bilibili-ticket-golang/cluster/dispatcher"
 	"bilibili-ticket-golang/cluster/domain"
 	clusterstorage "bilibili-ticket-golang/cluster/storage"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 const maxRetainedBuyerSyncBatches = 50
 
 // ProvisionBuyer creates or updates a buyer on a specific account.
 func (s *ClusterService) ProvisionBuyer(document string, confirmed bool) error {
+	reportAction(reporting.ActionBuyerProvision)
 	var input struct {
 		AccountID string       `json:"accountId"`
 		Buyer     domain.Buyer `json:"buyer"`
@@ -37,6 +39,7 @@ func (s *ClusterService) ProvisionBuyer(document string, confirmed bool) error {
 // a JSON document containing buyerIds and, optionally, accountIds. Empty
 // accountIds means every enabled account.
 func (s *ClusterService) StartBuyerSync(document string) (BuyerSyncBatch, error) {
+	reportAction(reporting.ActionBuyerSyncStart)
 	var req BuyerSyncStartRequest
 	if err := json.Unmarshal([]byte(document), &req); err != nil {
 		return BuyerSyncBatch{}, err

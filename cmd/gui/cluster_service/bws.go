@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 const bwsMetaFile = "data/bws/meta.json"
@@ -82,6 +83,7 @@ type BWSQueryInput struct {
 // ticket bound to a real-name identity. Accepts a JSON document with
 // accountId and workerId.
 func (s *ClusterService) CheckBWSBind(inputJSON string) (bool, error) {
+	reportAction(reporting.ActionBWSBindCheck)
 	var input BWSQueryInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return false, fmt.Errorf("invalid input: %w", err)
@@ -112,6 +114,7 @@ func (s *ClusterService) CheckBWSBind(inputJSON string) (bool, error) {
 // given dates. Accepts a JSON document with accountId, workerId, and
 // reserveDates (comma-separated).
 func (s *ClusterService) GetBWSReservationInfo(inputJSON string) (*BWSReservationResult, error) {
+	reportAction(reporting.ActionBWSReservationInfo)
 	var input BWSQueryInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return nil, fmt.Errorf("invalid input: %w", err)
@@ -184,6 +187,7 @@ type BWSBindInput struct {
 // BindBWSTicket binds a real-name identity to a BWS electronic ticket.
 // Accepts a JSON document with the fields defined in BWSBindInput.
 func (s *ClusterService) BindBWSTicket(inputJSON string) (int, string, error) {
+	reportAction(reporting.ActionBWSTicketBind)
 	var input BWSBindInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return -1, "", fmt.Errorf("invalid bind input: %w", err)
@@ -214,6 +218,7 @@ func (s *ClusterService) BindBWSTicket(inputJSON string) (int, string, error) {
 // Accepts a JSON document with the fields defined in BWSSubmitInput.
 // Returns the attempt ID that can be used with Status/Logs/Stop.
 func (s *ClusterService) SubmitBWS(inputJSON string) (string, error) {
+	reportAction(reporting.ActionBWSSubmit)
 	var input BWSSubmitInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return "", fmt.Errorf("invalid BWS submit input: %w", err)
@@ -389,6 +394,7 @@ func (s *ClusterService) GetBWSTaskLogs(workerID string, attemptID string) ([]BW
 
 // StopBWSTask stops a running BWS task on a worker.
 func (s *ClusterService) StopBWSTask(workerID string, attemptID string) error {
+	reportAction(reporting.ActionBWSStop)
 	ctx := context.Background()
 	node, err := s.repository.Worker(ctx, workerID)
 	if err != nil {
@@ -480,6 +486,7 @@ func (s *ClusterService) ListBWSEntries() ([]BWSListEntry, error) {
 // The entry will stop appearing in ListBWSEntries immediately.
 // Call StopBWSTask first if the task is still running on a worker.
 func (s *ClusterService) DeleteBWSEntry(attemptID string) error {
+	reportAction(reporting.ActionBWSDelete)
 	s.mu.Lock()
 	delete(s.bwsMeta, attemptID)
 	s.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 const maxEventLogSize = 5000
@@ -185,6 +186,7 @@ func (s *ClusterService) GetClusterEventLog() ClusterEventLog {
 }
 
 func (s *ClusterService) ClearClusterEventLog() (int64, error) {
+	reportAction(reporting.ActionClusterEventClear)
 	var deleted int64
 	if s.repository != nil {
 		n, err := s.repository.ClearClusterEvents(context.Background())

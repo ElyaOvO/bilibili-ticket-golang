@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 // ── Global configuration ──────────────────────────────────────────────
@@ -87,6 +88,7 @@ func (s *ClusterService) GetRetryInterval() int {
 // broadcasts the change to all running tasks, and pushes it to all
 // connected workers so they use the new value for future submissions.
 func (s *ClusterService) SetRetryInterval(ms int) {
+	reportAction(reporting.ActionSettingsRetryIntervalUpdate)
 	if ms < 50 {
 		ms = 50
 	}
@@ -127,6 +129,7 @@ func (s *ClusterService) GetStartDelay() int {
 // to start their scheduled tasks this many milliseconds early to account
 // for clock drift and network latency.
 func (s *ClusterService) SetStartDelay(ms int) {
+	reportAction(reporting.ActionSettingsStartDelayUpdate)
 	if ms < 0 {
 		ms = 0
 	}
@@ -176,6 +179,7 @@ func (s *ClusterService) GetBuyerManagerWorkerIDs() []string {
 // SetBuyerManagerWorkerIDs updates the worker pool used for account buyer
 // management operations such as syncing a buyer to many accounts.
 func (s *ClusterService) SetBuyerManagerWorkerIDs(workerIDs []string) {
+	reportAction(reporting.ActionSettingsBuyerWorkersUpdate)
 	workerIDs = normalizeBuyerManagerWorkerIDs(workerIDs)
 	s.mu.Lock()
 	s.globalCfg.BuyerManagerWorkerIDs = workerIDs

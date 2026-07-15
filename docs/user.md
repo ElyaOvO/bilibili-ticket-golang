@@ -441,7 +441,7 @@ Bilibili 返回 voucher → 注册 voucher 获取 gt/challenge
 
 验证码求解依赖一个 C 语言编写的本地动态库。发行版通常已自带，如未自带请按以下步骤安装：
 
-1. 前往 [Releases · firefly001988/biliTicker_gt](https://github.com/firefly001988/biliTicker_gt/releases) 下载最新版本。
+1. 前往 [Releases · It-s-bilibili-ticket-golang/biliTicker_gt](https://github.com/It-s-bilibili-ticket-golang/biliTicker_gt/releases) 下载最新版本。
 2. 根据你的系统选择对应文件：
 
    | 操作系统 | 文件名 |
@@ -490,7 +490,7 @@ Bilibili 返回 voucher → 注册 voucher 获取 gt/challenge
 | Attempt 一直 queued | ① 有健康 Worker 吗 ② 有可用账号吗 ③ 账号冷却中吗 |
 | Attempt failed | 点开看 reason 字段 |
 | 购票人带 `***` | Bilibili 没返回完整信息，稍后重新同步 |
-| 验证码库未加载 | ① 检查 `libs/` 目录下是否有对应 DLL ② 去 [Releases](https://github.com/firefly001988/biliTicker_gt/releases) 下载 |
+| 验证码库未加载 | ① 检查 `libs/` 目录下是否有对应 DLL ② 去 [Releases](https://github.com/It-s-bilibili-ticket-golang/biliTicker_gt/releases) 下载 |
 | 验证码求解失败 | ① 在「验证码测试」页测试 ② 更新验证码库到最新版 |
 
 ### 系统自动处理

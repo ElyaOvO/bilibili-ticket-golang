@@ -2,10 +2,12 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"bilibili-ticket-golang/cluster/domain"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 type fakeBackend struct {
@@ -78,5 +80,75 @@ func TestPartialSubOrdersProduceExplicitPartialTerminalResult(t *testing.T) {
 	r := (Engine{Backend: b}).Run(context.Background(), validSpec())
 	if r.State != domain.AttemptPartial || !r.Partial || r.Success || len(r.SubOrders) != 2 {
 		t.Fatalf("unexpected partial result: %#v", r)
+	}
+}
+
+func TestTerminalBackendErrorIsReportedOnce(t *testing.T) {
+	backendErr := errors.New("terminal backend failure")
+	b := &fakeBackend{outcomes: []Outcome{{Code: 100016, Err: backendErr}}}
+	var reports []ErrorEvent
+	result := (Engine{
+		Backend:        b,
+		ErrorOperation: "ticket.purchase",
+		ReportError:    func(event ErrorEvent) { reports = append(reports, event) },
+	}).Run(context.Background(), validSpec())
+
+	if result.State != domain.AttemptFailed || len(reports) != 1 {
+		t.Fatalf("result=%+v reports=%+v", result, reports)
+	}
+	if reports[0].Code != reporting.CodeExecutorAttemptFailed || reports[0].Operation != "ticket.purchase" ||
+		!errors.Is(reports[0].Err, backendErr) {
+		t.Fatalf("unexpected report: %+v", reports[0])
+	}
+}
+
+func TestRecoveredTransientErrorIsNotReported(t *testing.T) {
+	b := &fakeBackend{outcomes: []Outcome{
+		{Code: 7654, Err: errors.New("temporary network error")},
+		{Code: 0, OrderID: "order"},
+	}}
+	var reports []ErrorEvent
+	result := (Engine{
+		Backend:     b,
+		ReportError: func(event ErrorEvent) { reports = append(reports, event) },
+	}).Run(context.Background(), validSpec())
+
+	if !result.Success || len(reports) != 0 {
+		t.Fatalf("result=%+v reports=%+v", result, reports)
+	}
+}
+
+func TestInvalidSpecIsReportedAtExecutorBoundary(t *testing.T) {
+	var reports []ErrorEvent
+	result := (Engine{
+		Backend:     &fakeBackend{},
+		ReportError: func(event ErrorEvent) { reports = append(reports, event) },
+	}).Run(context.Background(), domain.ExecutionSpec{})
+
+	if result.State != domain.AttemptFailed || len(reports) != 1 || reports[0].Code != reporting.CodeExecutorSpecInvalid {
+		t.Fatalf("result=%+v reports=%+v", result, reports)
+	}
+}
+
+func TestNumericBiliOutcomeCreatesReportableError(t *testing.T) {
+	b := &fakeBackend{outcomes: []Outcome{{Code: 100016, Message: "sku not found"}}}
+	var reports []ErrorEvent
+	result := (Engine{
+		Backend:           b,
+		AttemptErrorCode:  reporting.CodeBiliAttemptFailed,
+		UpstreamNamespace: "BILI",
+		ErrorOperation:    "ticket.purchase",
+		ReportError:       func(event ErrorEvent) { reports = append(reports, event) },
+	}).Run(context.Background(), validSpec())
+
+	if result.State != domain.AttemptFailed || len(reports) != 1 {
+		t.Fatalf("result=%+v reports=%+v", result, reports)
+	}
+	if reports[0].Code != reporting.CodeBiliAttemptFailed {
+		t.Fatalf("code=%q", reports[0].Code)
+	}
+	var upstream *OutcomeError
+	if !errors.As(reports[0].Err, &upstream) || upstream.Code != 100016 || upstream.TelemetryCode() != "BILI_API_100016" {
+		t.Fatalf("unexpected upstream error: %T %+v", reports[0].Err, reports[0].Err)
 	}
 }

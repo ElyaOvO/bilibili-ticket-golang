@@ -39,7 +39,7 @@ func (c *BiliClient) CheckAndUpdateCookie() (bool, error) {
 		return false, nil
 	}
 	log.Println("[cookie] logged in, checking if refresh needed...")
-	refreshNeeded, err := c.checkNeedRefresh()
+	refreshNeeded, refreshTimestamp, err := c.checkNeedRefresh()
 	if err != nil {
 		log.Printf("[cookie] checkNeedRefresh failed: %v", err)
 		return false, err
@@ -55,7 +55,7 @@ func (c *BiliClient) CheckAndUpdateCookie() (bool, error) {
 	log.Printf("[cookie] old csrf=%s refresh_token=%s", maskToken(oldCSRF), maskToken(oldRefreshToken))
 
 	// Generate RSA-encrypted correspond path for CSRF exchange
-	encryptedPath, err := getCorrespondPath(c.Now().UnixMilli() - 100)
+	encryptedPath, err := getCorrespondPath(refreshTimestamp)
 	if err != nil {
 		log.Printf("[cookie] getCorrespondPath failed: %v", err)
 		return false, err
@@ -92,19 +92,22 @@ func (c *BiliClient) CheckAndUpdateCookie() (bool, error) {
 
 // checkNeedRefresh queries Bilibili's cookie/info endpoint to determine if the
 // current cookie session needs to be refreshed.
-func (c *BiliClient) checkNeedRefresh() (bool, error) {
+func (c *BiliClient) checkNeedRefresh() (bool, int64, error) {
 	resp, err := c.client.R().Get("https://passport.bilibili.com/x/passport-login/web/cookie/info")
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	var apiResp api.MainApiDataRoot[api.NeedRefreshStruct]
 	if err = resp.Unmarshal(&apiResp); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if err = apiResp.CheckValid(); err != nil {
-		return false, err
+		return false, 0, err
 	}
-	return apiResp.Data.NeedRefresh, nil
+	if apiResp.Data.NeedRefresh && apiResp.Data.Timestamp <= 0 {
+		return false, 0, errors.New("cookie refresh required but server timestamp is missing")
+	}
+	return apiResp.Data.NeedRefresh, apiResp.Data.Timestamp, nil
 }
 
 // getRefreshCSRF parses the CSRF token from Bilibili's correspond page HTML.
@@ -113,6 +116,9 @@ func (c *BiliClient) getRefreshCSRF(correspondPath string) (string, error) {
 	resp, err := c.client.R().Get(fmt.Sprintf("https://www.bilibili.com/correspond/1/%s", correspondPath))
 	if err != nil {
 		return "", err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("get refresh csrf: unexpected HTTP status %d", resp.StatusCode)
 	}
 	htmlBody := resp.String()
 	re := regexp.MustCompile(`<div id="1-name">(.*?)</div>`)

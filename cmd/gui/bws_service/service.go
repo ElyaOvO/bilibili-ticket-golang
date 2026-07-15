@@ -9,6 +9,7 @@ import (
 	"bilibili-ticket-golang/cmd/gui/store/configuration"
 	"bilibili-ticket-golang/lib/biliutils"
 	"bilibili-ticket-golang/lib/notify"
+	"bilibili-ticket-golang/lib/reporting"
 	"bilibili-ticket-golang/lib/scheduler"
 	"bilibili-ticket-golang/lib/tasklog"
 )
@@ -49,6 +50,7 @@ func New(client *biliutils.BiliClient, logs *tasklog.LogBroker, data *configurat
 }
 
 func (svc *BWSService) AddBWSEntry(entry FrontendBWSEntry) (string, error) {
+	reporting.ReportAction(reporting.ActionBWSLocalEntryAdd)
 	value := configuration.BWSEntry{
 		ActivityID: entry.ActivityID, TicketNo: entry.TicketNo, ActivityTitle: entry.ActivityTitle,
 		ReserveTime: entry.ReserveTime, ReserveDate: entry.ReserveDate, Expire: entry.Expire,
@@ -66,6 +68,11 @@ func (svc *BWSService) AddBWSEntry(entry FrontendBWSEntry) (string, error) {
 }
 
 func (svc *BWSService) AddBWSTask(hash string) error {
+	reporting.ReportAction(reporting.ActionBWSLocalTaskAdd)
+	return svc.addBWSTask(hash)
+}
+
+func (svc *BWSService) addBWSTask(hash string) error {
 	entries := svc.data.GetEntriesNoMutate()
 	var entry *configuration.BWSEntry
 	for i := range entries {
@@ -109,6 +116,7 @@ func (svc *BWSService) Close() {
 }
 
 func (svc *BWSService) RemoveBWSEntry(hash string) {
+	reporting.ReportAction(reporting.ActionBWSLocalEntryRemove)
 	svc.scheduler.RemoveTaskAndStream(hash, func() { svc.logs.CloseStream(hash) })
 	svc.data.RemoveEntryByHash(hash)
 	svc.persist("BWS entry removal")
@@ -137,7 +145,7 @@ func (svc *BWSService) ReloadBWSTasks() {
 		if entry.Stat == int(scheduler.StatSuccess) || entry.Stat == int(scheduler.StatFailed) || entry.Stat == int(scheduler.StatError) {
 			continue
 		}
-		_ = svc.AddBWSTask(hash)
+		_ = svc.addBWSTask(hash)
 	}
 }
 

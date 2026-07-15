@@ -219,7 +219,17 @@ func run(args []string) {
 	if offset, clockErr := biliclock.GetBilibiliClockOffset(); clockErr == nil {
 		executionClock = executor.OffsetClock{Offset: offset}
 	}
-	result := (executor.Engine{Backend: backend, Clock: executionClock}).Run(context.Background(), spec)
+	result := (executor.Engine{
+		Backend:           backend,
+		Clock:             executionClock,
+		ErrorOperation:    "ticket.purchase",
+		AttemptErrorCode:  reporting.CodeBiliAttemptFailed,
+		RetryErrorCode:    reporting.CodeBiliRetryExhausted,
+		UpstreamNamespace: "BILI",
+		ReportError: func(event executor.ErrorEvent) {
+			reporting.ReportErrorOp(event.Code, event.Operation, event.Err)
+		},
+	}).Run(context.Background(), spec)
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		fatal("encode result: %v", err)
 	}
@@ -293,7 +303,7 @@ func writeFile(path string, data []byte, perm os.FileMode) {
 
 func fatal(format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
-	reporting.ReportError(reporting.CodeWorkerFatal, errors.New(message))
+	reporting.ReportErrorOp(reporting.CodeWorkerFatal, "worker.fatal", errors.New(message))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = reporting.Flush(ctx)
 	cancel()

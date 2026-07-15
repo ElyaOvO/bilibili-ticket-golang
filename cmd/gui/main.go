@@ -54,6 +54,7 @@ func main() {
 		global.ReportTimeout,
 		global.ReportSkipSSLCheck,
 	))
+	reporting.ReportAction(reporting.ActionAppStart)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -158,6 +159,10 @@ func main() {
 	})
 	c, err := biliutils.NewBiliClientWithCookiejar(jar)
 	if err != nil {
+		reporting.ReportErrorOp(reporting.CodeBiliClientInitFailed, "catalog.client.initialize", err)
+		flushCtx, cancelFlush := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = reporting.Flush(flushCtx)
+		cancelFlush()
 		fault := global.NewFault("创建 Bilibili 客户端", err, "检查网络连接和 Cookie 有效性")
 		log.Fatalf("[main] %v", fault)
 	}
@@ -216,6 +221,7 @@ func main() {
 	app := NewAppWithClientAndStore(c, store)
 
 	defer func() {
+		reporting.ReportAction(reporting.ActionAppStop)
 		bwsSvc.Close()
 		clusterSvc.Close()
 		c.PersistCookies()
@@ -298,7 +304,6 @@ func main() {
 	})
 
 	if err = wailsApp.Run(); err != nil {
-		reporting.ReportError(reporting.CodeGUIRuntimeError, err)
 		log.Printf("[main] Error: %v", err)
 	}
 }

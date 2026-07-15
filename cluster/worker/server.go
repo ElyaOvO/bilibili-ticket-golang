@@ -19,6 +19,7 @@ import (
 	"bilibili-ticket-golang/lib/biliutils"
 	biliclock "bilibili-ticket-golang/lib/biliutils/clock"
 	"bilibili-ticket-golang/lib/models/bili/api"
+	"bilibili-ticket-golang/lib/reporting"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -47,6 +48,21 @@ type Config struct {
 	CACertPEM     []byte `json:"caCertPEM,omitempty"`
 	ServerCertPEM []byte `json:"serverCertPEM,omitempty"`
 	ServerKeyPEM  []byte `json:"serverKeyPEM,omitempty"`
+}
+
+func reportWorkerError(code, operation string, err error) {
+	if err != nil {
+		reporting.ReportErrorOp(code, operation, err)
+	}
+}
+
+func reportExecutorError(event executor.ErrorEvent) {
+	reportWorkerError(event.Code, event.Operation, event.Err)
+}
+
+func workerRPCError(code, operation, message string, err error) error {
+	reportWorkerError(code, operation, err)
+	return status.Errorf(codes.Internal, "%s: %v", message, err)
 }
 
 func (c *Config) Normalize() error {
@@ -187,6 +203,7 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 			result.Message = "worker restarted after partially creating split orders"
 			result.FinishedAt = time.Now()
 			if err := store.Append(result); err != nil {
+				reportWorkerError(reporting.CodeWorkerResultPersistFailed, "worker.result.recover", err)
 				_ = WriteRedactedLog(config.DataDir, "persist recovered partial result failed: "+err.Error())
 			}
 		}
@@ -492,6 +509,7 @@ func (ws *workerService) Ack(_ context.Context, req *pb.AckRequest) (*pb.AckResp
 	}
 	if err := s.store.Ack(id); err != nil {
 		s.mu.Unlock()
+		reportWorkerError(reporting.CodeWorkerResultAckFailed, "worker.result.ack", err)
 		return nil, status.Errorf(codes.Internal, "persist result acknowledgement: %v", err)
 	}
 	delete(s.tasks, id)
@@ -530,12 +548,12 @@ func (ws *workerService) ListBuyers(_ context.Context, req *pb.ListBuyersRequest
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.account.list.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	errVal, list := client.GetRealnameBuyerListNew()
 	if errVal != nil {
-		return nil, status.Errorf(codes.Internal, "list buyers: %v", errVal)
+		return nil, workerRPCError(reporting.CodeWorkerAccountQueryFailed, "worker.account.list_buyers", "list buyers", errVal)
 	}
 	buyers := make([]*pb.Buyer, 0, len(list))
 	for i, item := range list {
@@ -586,12 +604,12 @@ func (ws *workerService) ListBuyersMasked(_ context.Context, req *pb.ListBuyersR
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.account.list_masked.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	errVal, list := client.GetRealnameBuyerListNew()
 	if errVal != nil {
-		return nil, status.Errorf(codes.Internal, "list buyers: %v", errVal)
+		return nil, workerRPCError(reporting.CodeWorkerAccountQueryFailed, "worker.account.list_buyers_masked", "list buyers", errVal)
 	}
 	buyers := make([]*pb.Buyer, 0, len(list))
 	for i, item := range list {
@@ -629,12 +647,12 @@ func (ws *workerService) CreateBuyer(ctx context.Context, req *pb.CreateBuyerReq
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.account.create.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	b := req.Buyer
 	if created, errVal := findRemoteBuyer(client, b); errVal != nil {
-		return nil, status.Errorf(codes.Internal, "list buyers before create: %v", errVal)
+		return nil, workerRPCError(reporting.CodeWorkerAccountQueryFailed, "worker.account.create.preflight", "list buyers before create", errVal)
 	} else if created != nil {
 		refreshed := backend.Credentials()
 		return &pb.CreateBuyerResponse{
@@ -645,16 +663,17 @@ func (ws *workerService) CreateBuyer(ctx context.Context, req *pb.CreateBuyerReq
 
 	if errVal := client.CreateBuyer(b.Name, b.Tel, int(b.Type), b.IdCard, false); errVal != nil {
 		if !isBuyerAlreadyExistsError(errVal) {
-			return nil, status.Errorf(codes.Internal, "create buyer: %v", errVal)
+			return nil, workerRPCError(reporting.CodeWorkerAccountCreateFailed, "worker.account.create_buyer", "create buyer", errVal)
 		}
 	}
 
 	created, errVal := waitForRemoteBuyer(ctx, client, b)
 	if errVal != nil {
-		return nil, status.Errorf(codes.Internal, "list buyers after create: %v", errVal)
+		return nil, workerRPCError(reporting.CodeWorkerAccountQueryFailed, "worker.account.create.verify", "list buyers after create", errVal)
 	}
 	if created == nil {
-		return nil, status.Error(codes.Internal, "created buyer was not returned by API")
+		err := errors.New("created buyer was not returned by API")
+		return nil, workerRPCError(reporting.CodeWorkerAccountCreateFailed, "worker.account.create.verify", "verify created buyer", err)
 	}
 	refreshed := backend.Credentials()
 	return &pb.CreateBuyerResponse{
@@ -784,12 +803,12 @@ func (ws *workerService) GetBuyerSensitiveData(_ context.Context, req *pb.GetBuy
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.account.sensitive.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	sensitiveErr, sensitive := client.GetTargetBuyerSensitiveData(req.BuyerId)
 	if sensitiveErr != nil {
-		return nil, status.Errorf(codes.Internal, "get buyer sensitive data: %v", sensitiveErr)
+		return nil, workerRPCError(reporting.CodeWorkerAccountQueryFailed, "worker.account.get_sensitive", "get buyer sensitive data", sensitiveErr)
 	}
 	return &pb.GetBuyerSensitiveDataResponse{
 		Buyer: &pb.Buyer{
@@ -816,11 +835,11 @@ func (ws *workerService) DeleteBuyer(_ context.Context, req *pb.DeleteBuyerReque
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.account.delete.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	if errVal := client.DeleteTargetBuyer(req.BuyerId); errVal != nil {
-		return nil, status.Errorf(codes.Internal, "delete buyer: %v", errVal)
+		return nil, workerRPCError(reporting.CodeWorkerAccountDeleteFailed, "worker.account.delete_buyer", "delete buyer", errVal)
 	}
 	return &pb.DeleteBuyerResponse{}, nil
 }
@@ -836,12 +855,12 @@ func (ws *workerService) CheckBWSBind(_ context.Context, req *pb.CheckBWSBindReq
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.bws.check_bind.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	isBind, err := client.CheckBWSBindStatus()
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "check BWS bind: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBWSQueryFailed, "worker.bws.check_bind", "check BWS bind", err)
 	}
 	refreshed := backend.Credentials()
 	return &pb.CheckBWSBindResponse{
@@ -864,12 +883,12 @@ func (ws *workerService) GetBWSReservationInfo(_ context.Context, req *pb.BWSRes
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.bws.reservation_info.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	data, err := client.GetBWSReservationInfo(req.ReserveDates, int(req.ReserveType))
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "get BWS reservation info: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBWSQueryFailed, "worker.bws.reservation_info", "get BWS reservation info", err)
 	}
 
 	// Build activities list
@@ -926,12 +945,12 @@ func (ws *workerService) BindBWSTicket(_ context.Context, req *pb.BindBWSTicketR
 	creds := credentialsFromProto(req.Credentials)
 	backend, err := executor.NewBilibiliBackend(creds)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "initialize Bilibili client: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBackendInitFailed, "worker.bws.bind.initialize", "initialize Bilibili client", err)
 	}
 	client, _ := backend.ClientAndJar()
 	code, message, err := client.BindBWSTicket(int(req.Bid), int(req.IdType), req.PersonalId, req.TicketNo, req.UserName)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "bind BWS ticket: %v", err)
+		return nil, workerRPCError(reporting.CodeWorkerBWSBindFailed, "worker.bws.bind_ticket", "bind BWS ticket", err)
 	}
 	refreshed := backend.Credentials()
 	return &pb.BindBWSTicketResponse{
@@ -1345,6 +1364,7 @@ func (s *Server) run(ctx context.Context, t *task) {
 
 	backend, err := s.factory(t.spec)
 	if err != nil {
+		reportWorkerError(reporting.CodeWorkerBackendInitFailed, "worker.ticket_backend.initialize", err)
 		s.complete(t, domain.ExecutionResult{AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID, State: domain.AttemptFailed, Reason: domain.FailureInternal, Message: err.Error(), FinishedAt: s.now()})
 		return
 	}
@@ -1372,6 +1392,7 @@ func (s *Server) run(ctx context.Context, t *task) {
 				return
 			}
 			if err := s.store.Append(progress); err != nil {
+				reportWorkerError(reporting.CodeWorkerResultPersistFailed, "worker.split_order.persist", err)
 				_ = WriteRedactedLog(s.config.DataDir, "persist split-order progress failed: "+err.Error())
 			}
 			s.mu.Lock()
@@ -1397,8 +1418,13 @@ func (s *Server) run(ctx context.Context, t *task) {
 		}
 	}
 	result := (executor.Engine{
-		Backend: backend,
-		Clock:   executionClock,
+		Backend:           backend,
+		Clock:             executionClock,
+		ReportError:       reportExecutorError,
+		ErrorOperation:    "ticket.purchase",
+		AttemptErrorCode:  reporting.CodeBiliAttemptFailed,
+		RetryErrorCode:    reporting.CodeBiliRetryExhausted,
+		UpstreamNamespace: "BILI",
 		Observe: func(event executor.Event) {
 			s.logTask(t, event.Stage, event.Message, event.Code, event.Retryable)
 			s.mu.Lock()
@@ -1439,6 +1465,7 @@ func (s *Server) runBWS(ctx context.Context, t *task) {
 
 	bwsBackend, err := executor.NewBWSBackend(t.spec.Credentials)
 	if err != nil {
+		reportWorkerError(reporting.CodeWorkerBackendInitFailed, "worker.bws_backend.initialize", err)
 		s.complete(t, domain.ExecutionResult{
 			AttemptID: t.spec.AttemptID, IntentID: t.spec.IntentID,
 			State: domain.AttemptFailed, Reason: domain.FailureInternal,
@@ -1467,9 +1494,14 @@ func (s *Server) runBWS(ctx context.Context, t *task) {
 	}
 
 	result := (executor.Engine{
-		Backend:    bwsBackend,
-		Classifier: executor.BWSClassifier{},
-		Clock:      executionClock,
+		Backend:           bwsBackend,
+		Classifier:        executor.BWSClassifier{},
+		Clock:             executionClock,
+		ReportError:       reportExecutorError,
+		ErrorOperation:    "bws.reserve",
+		AttemptErrorCode:  reporting.CodeBWSAttemptFailed,
+		RetryErrorCode:    reporting.CodeBWSRetryExhausted,
+		UpstreamNamespace: "BWS",
 		Observe: func(event executor.Event) {
 			s.logTask(t, event.Stage, event.Message, event.Code, event.Retryable)
 		},
@@ -1496,6 +1528,7 @@ func (s *Server) complete(t *task, result domain.ExecutionResult) {
 	// degraded durability; if the append succeeds it also survives restarts.
 	if hasOrderFacts(result) {
 		if err := s.store.Append(result); err != nil {
+			reportWorkerError(reporting.CodeWorkerResultPersistFailed, "worker.order.persist", err)
 			_ = WriteRedactedLog(s.config.DataDir, "persist order result failed: "+err.Error())
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"bilibili-ticket-golang/cluster/domain"
 	"bilibili-ticket-golang/cmd/gui/payqr"
 	"bilibili-ticket-golang/lib/global"
+	"bilibili-ticket-golang/lib/reporting"
 )
 
 const (
@@ -183,6 +184,7 @@ func (s *ClusterService) ListOrderRecords() (OrderRecordList, error) {
 }
 
 func (s *ClusterService) OpenOrderPayment(recordID string) error {
+	reportAction(reporting.ActionOrderPaymentOpen)
 	if s.repository == nil {
 		return global.NewFault("打开订单支付二维码", fmt.Errorf("repository is not available"), "请重启应用并确认集群数据库已正常初始化")
 	}

@@ -1,6 +1,9 @@
 package main
 
-import "bilibili-ticket-golang/lib/tasklog"
+import (
+	"bilibili-ticket-golang/lib/reporting"
+	"bilibili-ticket-golang/lib/tasklog"
+)
 
 // TaskLogService exposes task-log queries to Wails without coupling the core
 // tasklog package to the GUI runtime.
@@ -25,6 +28,7 @@ func (svc *TaskLogService) GetRecentLogs() map[string]tasklog.LogEntry {
 }
 
 func (svc *TaskLogService) ClearHistory(taskID string) {
+	reporting.ReportAction(reporting.ActionTaskLogClear)
 	svc.broker.ClearHistory(taskID)
 }
 

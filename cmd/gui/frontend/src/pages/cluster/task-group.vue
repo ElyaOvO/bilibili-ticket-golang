@@ -7,8 +7,7 @@ import WorkerPicker from '@/components/cluster/WorkerPicker.vue'
 import AccountPicker from '@/components/cluster/AccountPicker.vue'
 import BuyerPicker from '@/components/cluster/BuyerPicker.vue'
 import type { SearchableBuyer } from '@/composables/buyerSearch'
-import { Snapshot, SaveMacro, DeleteMacro, SavePurchaseGroup, DeletePurchaseGroup, StopTaskGroup, ForceStopTaskGroup, ForceRestartTaskGroup, StartTaskGroup, StopIntent, SaveTaskGroup } from '../../../bindings/bilibili-ticket-golang/cmd/gui/cluster_service/clusterservice'
-import { GetProjectInformationNew, GetTicketSkuIDsByProjectIDNew } from '../../../bindings/bilibili-ticket-golang/lib/biliutils/biliclient'
+import { Snapshot, SaveMacro, DeleteMacro, SavePurchaseGroup, DeletePurchaseGroup, StopTaskGroup, ForceStopTaskGroup, ForceRestartTaskGroup, StartTaskGroup, StopIntent, SaveTaskGroup, LoadProject } from '../../../bindings/bilibili-ticket-golang/cmd/gui/cluster_service/clusterservice'
 
 const route = useRoute(); const { t, locale } = useI18n(); const messages = useMessagesStore()
 const START_REFLOW_NOW_TOKEN = '__cluster_reflow_now__'
@@ -287,7 +286,35 @@ watch(selectedTicket, (t) => {
     }
 })
 
-async function lookupProject() { const pid = lookupProjectId.value.trim(); if (!pid) { messages.add({ text: t('taskGroup.projectIdRequired'), color: 'warning' }); return } lookupLoading.value = true; projectInfo.value = null; tickets.value = []; selectedScreenId.value = 0; selectedSkuId.value = 0; try { const [info, tks] = await Promise.all([GetProjectInformationNew(pid), GetTicketSkuIDsByProjectIDNew(pid)]); if (!info) messages.add({ text: t('taskGroup.projectNotFound'), color: 'warning' }); else { projectInfo.value = info; tickets.value = tks || [] } } catch (e: any) { messages.add({ text: t('taskGroup.lookupFailed', { error: String(e) }), color: 'error' }) } lookupLoading.value = false }
+async function lookupProject() {
+    const pid = lookupProjectId.value.trim()
+    if (!pid) { messages.add({ text: t('taskGroup.projectIdRequired'), color: 'warning' }); return }
+    lookupLoading.value = true; projectInfo.value = null; tickets.value = []; selectedScreenId.value = 0; selectedSkuId.value = 0
+    try {
+        const catalog: any = await LoadProject(pid)
+        projectInfo.value = {
+            ProjectID: catalog.id,
+            ProjectName: catalog.name,
+            IsForceRealName: catalog.forceRealName,
+            StartTime: catalog.start,
+            EndTime: catalog.end,
+        }
+        tickets.value = (catalog.tickets || []).map((ticket: any) => ({
+            screenId: ticket.screenId,
+            skuId: ticket.skuId,
+            name: ticket.screenName,
+            desc: ticket.skuName,
+            price: ticket.price,
+            buyLimit: ticket.orderCapacity,
+            eventTime: ticket.eventTime,
+            saleStat: { start: ticket.saleStart, end: ticket.saleEnd },
+            flags: { displayName: ticket.status },
+        }))
+    } catch (e: any) {
+        messages.add({ text: t('taskGroup.lookupFailed', { error: String(e) }), color: 'error' })
+    }
+    lookupLoading.value = false
+}
 
 async function addMacro() { if (!projectInfo.value || !selectedScreenId.value || !selectedSkuId.value || !group.value) return; const ticket = selectedTicket.value; addingMacroInfo.value = { projectName: projectInfo.value.ProjectName || '', eventDay: ticket?.eventTime || projectInfo.value.StartTime || '', screenName: ticket?.name || '', skuName: ticket?.desc || '', price: ((ticket?.price || 0) / 100), buyLimit: ticket?.buyLimit || 1, saleStart: customStartAt.value || ticket?.saleStat?.start || '', saleEnd: ticket?.saleStat?.end || '', isRealName: projectInfo.value.IsForceRealName || false }; showAddConfirmDialog.value = true }
 

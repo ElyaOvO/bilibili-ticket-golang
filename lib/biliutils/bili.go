@@ -160,7 +160,7 @@ func newBiliClient(jar http.CookieJar, profile *DeviceProfile) (*BiliClient, err
 			// Filter requests by host and path to set appropriate User-Agent and headers.
 			if req.URL.Host == "api.bilibili.com" && (req.URL.Path == "/x/internal/gaia-gateway/ExClimbWuzhi" || req.URL.Path == "/x/internal/gaia-gateway/ExGetAxe" || req.URL.Path == "/x/internal/gaia-gateway/ExClimbCongLing") {
 				ua = browserUA(biliClient.appVersion)
-			} else if req.URL.Host == "passport.bilibili.com" || (req.URL.Host == "show.bilibili.com" && (req.URL.Path == "/api/ticket/order/createstatus" || req.URL.Path == "/api/ticket/order/getPayParam")) {
+			} else if req.URL.Host == "passport.bilibili.com" || (req.URL.Host == "show.bilibili.com" && (req.URL.Path == "/api/ticket/order/createstatus" || req.URL.Path == "/api/ticket/order/getPayParam") || (req.URL.Host == "www.bilibili.com")) {
 				ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.56 Safari/537.36"
 			} else if req.URL.Host == "show.bilibili.com" {
 				req.SetHeader("x-requested-with", "tv.danmaku.bili")
