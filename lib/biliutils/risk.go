@@ -131,6 +131,7 @@ func (c *BiliClient) getRefreshCSRF(correspondPath string) (string, error) {
 
 // refreshCookie calls Bilibili's cookie refresh endpoint to exchange old tokens for new ones.
 func (c *BiliClient) refreshCookie(csrfToken, refreshCsrfToken, refreshToken string) (string, error) {
+	refreshURL, _ := url.Parse("https://passport.bilibili.com/x/passport-login/web/cookie/refresh")
 	resp, err := c.client.R().SetFormData(map[string]string{
 		"refresh_token": refreshToken,
 		"source":        "main_web",
@@ -146,6 +147,18 @@ func (c *BiliClient) refreshCookie(csrfToken, refreshCsrfToken, refreshToken str
 	}
 	if err = apiResp.CheckValid(); err != nil {
 		return "", err
+	}
+	// net/http only replaces cookies with the same name, domain and path. Old
+	// versions could leave host-only variants behind, so credential refresh must
+	// explicitly make every returned Set-Cookie value authoritative by name.
+	if freshCookies := resp.Cookies(); len(freshCookies) > 0 && c.cookieJar != nil {
+		if replacer, ok := c.cookieJar.(interface {
+			ReplaceCookies(*url.URL, []*http.Cookie)
+		}); ok {
+			replacer.ReplaceCookies(refreshURL, freshCookies)
+		} else {
+			c.cookieJar.SetCookies(refreshURL, freshCookies)
+		}
 	}
 	return apiResp.Data.RefreshToken, nil
 }

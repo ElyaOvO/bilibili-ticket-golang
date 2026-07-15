@@ -437,6 +437,44 @@ func (j *Jar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	j.setCookies(u, cookies, time.Now())
 }
 
+// ReplaceCookies removes every existing cookie in the request URL's site with
+// a name present in cookies, regardless of its old subdomain/path scope, and
+// then stores the new cookies.
+// This is used for credential rotation, where the server's fresh Set-Cookie
+// values must supersede stale host-only variants left by older versions.
+func (j *Jar) ReplaceCookies(u *url.URL, cookies []*http.Cookie) {
+	if len(cookies) == 0 || (u.Scheme != "http" && u.Scheme != "https") {
+		return
+	}
+	host, err := canonicalHost(u.Host)
+	if err != nil {
+		return
+	}
+	key := jarKey(host, j.psList)
+	defPath := defaultPath(u.Path)
+	now := time.Now()
+	names := make(map[string]struct{}, len(cookies))
+	for _, cookie := range cookies {
+		if cookie != nil {
+			names[cookie.Name] = struct{}{}
+		}
+	}
+
+	j.mu.Lock()
+	if submap := j.entries[key]; submap != nil {
+		for cookieID, entry := range submap {
+			if _, ok := names[entry.Name]; ok {
+				delete(submap, cookieID)
+			}
+		}
+		if len(submap) == 0 {
+			delete(j.entries, key)
+		}
+	}
+	j.setCookiesLocked(key, host, defPath, cookies, now)
+	j.mu.Unlock()
+}
+
 // setCookies is like SetCookies but takes the current time as parameter.
 func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 	if len(cookies) == 0 {
@@ -456,7 +494,10 @@ func (j *Jar) setCookies(u *url.URL, cookies []*http.Cookie, now time.Time) {
 
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	j.setCookiesLocked(key, host, defPath, cookies, now)
+}
 
+func (j *Jar) setCookiesLocked(key, host, defPath string, cookies []*http.Cookie, now time.Time) {
 	submap := j.entries[key]
 	for _, cookie := range cookies {
 		e, err := j.newEntry(cookie, now, defPath, host)

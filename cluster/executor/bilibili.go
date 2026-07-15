@@ -65,7 +65,17 @@ func NewBilibiliBackend(credentials domain.Credentials) (*BilibiliBackend, error
 
 func NewBilibiliBackendWithSolver(credentials domain.Credentials, solver biliutils.CaptchaSolverFn) (*BilibiliBackend, error) {
 	jar := cookiejar.New(nil)
+	domainCookies := make(map[string]struct{})
 	for _, saved := range credentials.CookieJar {
+		if strings.TrimPrefix(saved.Domain, ".") == "bilibili.com" {
+			domainCookies[saved.Name+"\x00"+saved.Path] = struct{}{}
+		}
+	}
+	for _, saved := range credentials.CookieJar {
+		_, hasDomainCookie := domainCookies[saved.Name+"\x00"+saved.Path]
+		if hasDomainCookie && strings.TrimPrefix(saved.Domain, ".") != "bilibili.com" {
+			continue
+		}
 		host := strings.TrimPrefix(saved.Domain, ".")
 		if host == "" {
 			host = "www.bilibili.com"
@@ -77,13 +87,18 @@ func NewBilibiliBackendWithSolver(credentials domain.Credentials, solver biliuti
 		}
 		jar.SetCookies(u, []*http.Cookie{cookie})
 	}
-	for _, host := range []string{"https://api.bilibili.com/", "https://bilibili.com/", "https://www.bilibili.com/", "https://show.bilibili.com/", "https://passport.bilibili.com/"} {
-		cookies := make([]*http.Cookie, 0, len(credentials.Cookies))
-		for name, value := range credentials.Cookies {
-			cookies = append(cookies, &http.Cookie{Name: name, Value: value, Path: "/"})
-		}
-		if u, err := http.NewRequest(http.MethodGet, host, nil); err == nil {
-			jar.SetCookies(u.URL, cookies)
+	// The flat Cookies map is only a compatibility fallback. Replaying it with
+	// CookieJar would create stale host-only duplicates of refreshed domain
+	// cookies and make requests depend on cookie ordering.
+	if len(credentials.CookieJar) == 0 {
+		for _, host := range []string{"https://api.bilibili.com/", "https://bilibili.com/", "https://www.bilibili.com/", "https://show.bilibili.com/", "https://passport.bilibili.com/"} {
+			cookies := make([]*http.Cookie, 0, len(credentials.Cookies))
+			for name, value := range credentials.Cookies {
+				cookies = append(cookies, &http.Cookie{Name: name, Value: value, Path: "/"})
+			}
+			if u, err := http.NewRequest(http.MethodGet, host, nil); err == nil {
+				jar.SetCookies(u.URL, cookies)
+			}
 		}
 	}
 	var client *biliutils.BiliClient

@@ -15,26 +15,7 @@ import (
 // accountClient creates a BiliClient from stored credentials.
 func accountClient(account domain.Account) (*biliutils.BiliClient, *cookiejar.Jar, error) {
 	jar := cookiejar.New(nil)
-	for _, saved := range account.Credentials.CookieJar {
-		host := strings.TrimPrefix(saved.Domain, ".")
-		if host == "" {
-			host = "www.bilibili.com"
-		}
-		u, _ := url.Parse("https://" + host + "/")
-		cookie := &http.Cookie{Name: saved.Name, Value: saved.Value, Domain: saved.Domain, Path: saved.Path, Secure: saved.Secure, HttpOnly: saved.HTTPOnly}
-		if saved.Expires > 0 {
-			cookie.Expires = time.Unix(saved.Expires, 0)
-		}
-		jar.SetCookies(u, []*http.Cookie{cookie})
-	}
-	cookies := make([]*http.Cookie, 0, len(account.Credentials.Cookies))
-	for name, value := range account.Credentials.Cookies {
-		cookies = append(cookies, &http.Cookie{Name: name, Value: value, Path: "/"})
-	}
-	for _, raw := range []string{"https://www.bilibili.com/", "https://show.bilibili.com/", "https://passport.bilibili.com/"} {
-		u, _ := url.Parse(raw)
-		jar.SetCookies(u, cookies)
-	}
+	restoreAccountCookies(jar, account.Credentials)
 	var client *biliutils.BiliClient
 	var err error
 	if len(account.Credentials.DeviceProfile) > 0 {
@@ -51,6 +32,45 @@ func accountClient(account domain.Account) (*biliutils.BiliClient, *cookiejar.Ja
 	}
 	client.SetRefreshToken(account.Credentials.RefreshToken)
 	return client, jar, nil
+}
+
+func restoreAccountCookies(jar *cookiejar.Jar, credentials domain.Credentials) {
+	domainCookies := make(map[string]struct{})
+	for _, saved := range credentials.CookieJar {
+		if strings.TrimPrefix(saved.Domain, ".") == "bilibili.com" {
+			domainCookies[saved.Name+"\x00"+saved.Path] = struct{}{}
+		}
+	}
+	for _, saved := range credentials.CookieJar {
+		_, hasDomainCookie := domainCookies[saved.Name+"\x00"+saved.Path]
+		if hasDomainCookie && strings.TrimPrefix(saved.Domain, ".") != "bilibili.com" {
+			continue
+		}
+		host := strings.TrimPrefix(saved.Domain, ".")
+		if host == "" {
+			host = "www.bilibili.com"
+		}
+		u, _ := url.Parse("https://" + host + "/")
+		cookie := &http.Cookie{Name: saved.Name, Value: saved.Value, Domain: saved.Domain, Path: saved.Path, Secure: saved.Secure, HttpOnly: saved.HTTPOnly}
+		if saved.Expires > 0 {
+			cookie.Expires = time.Unix(saved.Expires, 0)
+		}
+		jar.SetCookies(u, []*http.Cookie{cookie})
+	}
+	// Cookies is a legacy, lossy name/value projection. Loading it on top of
+	// CookieJar creates host-only duplicates which Bilibili's domain-cookie
+	// refresh cannot overwrite, so only use it for old credentials that do not
+	// contain the structured jar yet.
+	if len(credentials.CookieJar) == 0 {
+		cookies := make([]*http.Cookie, 0, len(credentials.Cookies))
+		for name, value := range credentials.Cookies {
+			cookies = append(cookies, &http.Cookie{Name: name, Value: value, Path: "/"})
+		}
+		for _, raw := range []string{"https://www.bilibili.com/", "https://show.bilibili.com/", "https://passport.bilibili.com/"} {
+			u, _ := url.Parse(raw)
+			jar.SetCookies(u, cookies)
+		}
+	}
 }
 
 // credentialsFrom extracts the current credentials from a BiliClient and
