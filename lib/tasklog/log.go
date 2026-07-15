@@ -1,12 +1,14 @@
-package scheduler
+package tasklog
 
 import (
-	"bilibili-ticket-golang/lib/global"
 	"sync"
 	"time"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+const defaultRingCapacity = 1000
+
+// EmitFunc forwards a structured log event to an optional presentation layer.
+type EmitFunc func(event string, data any)
 
 // LogLevel represents the severity level of a log entry.
 type LogLevel string
@@ -77,12 +79,11 @@ func (rb *ringBuffer) clear() {
 	rb.size = 0
 }
 
-// LogBroker manages per-task log rings and pushes real-time entries to the
-// frontend via Wails runtime events. It is exposed as a Wails binding so the
-// frontend can call GetHistory / ClearHistory directly.
+// LogBroker manages per-task log rings and optionally forwards real-time
+// entries through an injected emitter.
 // Logs are persisted to disk via LogStorage so they survive application restarts.
 type LogBroker struct {
-	app     *application.App
+	emitter EmitFunc
 	mu      sync.RWMutex
 	rings   map[string]*ringBuffer
 	streams map[string]chan LogEntry
@@ -98,16 +99,16 @@ func NewLogBroker(storage *LogStorage) *LogBroker {
 		rings:   make(map[string]*ringBuffer),
 		streams: make(map[string]chan LogEntry),
 		done:    make(map[string]chan struct{}),
-		maxCap:  global.DefaultRingCapacity,
+		maxCap:  defaultRingCapacity,
 		storage: storage,
 	}
 }
 
-// SetApp stores the Wails v3 application reference for event emitting.
-func (lb *LogBroker) SetApp(app *application.App) {
+// SetEmitter configures an optional presentation-layer event sink.
+func (lb *LogBroker) SetEmitter(emitter EmitFunc) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
-	lb.app = app
+	lb.emitter = emitter
 }
 
 // CreateStream returns a send-only channel that the task uses to emit logs.
@@ -183,10 +184,10 @@ func (lb *LogBroker) ingest(taskID string, entry LogEntry) {
 
 	// 3. Emit to frontend via Wails v3 event system.
 	lb.mu.RLock()
-	app := lb.app
+	emitter := lb.emitter
 	lb.mu.RUnlock()
-	if app != nil {
-		app.Event.Emit("ticket:log", entry)
+	if emitter != nil {
+		emitter("ticket:log", entry)
 	}
 }
 

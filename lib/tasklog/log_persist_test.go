@@ -1,4 +1,4 @@
-package scheduler
+package tasklog
 
 import (
 	"testing"

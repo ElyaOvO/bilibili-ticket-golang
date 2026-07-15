@@ -700,14 +700,6 @@
         "filterEmpty": "No matching buyers",
         "filterClear": "Clear Filter"
     },
-    "verified": {
-        "title": "Verification Statement",
-        "description": "This tool is for personal study and research only. Scalping is strictly prohibited.",
-        "instruction": "Enter the required phrase and press Enter to continue:",
-        "error": "Incorrect input, please try again",
-        "confirm": "Confirm",
-        "checking": "Checking..."
-    },
     "index": {
         "title": "BanG Dream! It’s BtGO!!!!!",
         "mirrorLabel": "Switch Mirror",

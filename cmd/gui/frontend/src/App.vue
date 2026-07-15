@@ -2,7 +2,6 @@
 import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n'
 import router from './router';
-import VerifiedOverlay from './components/VerifiedOverlay.vue';
 import { useMessagesStore } from './stores/snackbar';
 import {
   Snapshot,
@@ -13,7 +12,6 @@ import {
 const { t, locale } = useI18n()
 const messages = useMessagesStore();
 
-const verified = ref(false)
 const showLangPicker = ref(false)
 
 // Detect OS language for the picker default
@@ -103,8 +101,6 @@ onMounted(async () => {
 </script>
 
 <template>
-  <VerifiedOverlay @verified="verified = true" />
-
   <!-- First-startup language picker -->
   <v-overlay v-model="showLangPicker" class="align-center justify-center" persistent :opacity="0.95">
     <v-card width="400" class="pa-6 rounded-lg" elevation="8">
@@ -124,7 +120,7 @@ onMounted(async () => {
     </v-card>
   </v-overlay>
 
-  <v-app v-if="verified && !showLangPicker" class="rounded rounded-md">
+  <v-app v-if="!showLangPicker" class="rounded rounded-md">
     <v-navigation-drawer v-if="!isPayQR" expand-on-hover permanent>
       <v-list density="compact" nav activatable :activated="calculatedPath">
         <v-list-item :title="t('nav.home')" value="home" prepend-icon="mdi-home" @click="router.push('/')" />

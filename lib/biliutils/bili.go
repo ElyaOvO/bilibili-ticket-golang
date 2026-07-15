@@ -1,14 +1,10 @@
 package biliutils
 
 import (
-	"bilibili-ticket-golang/lib/githubutils"
-	"bilibili-ticket-golang/lib/global"
 	"bilibili-ticket-golang/lib/models/bili/api"
 	"bilibili-ticket-golang/lib/models/errors"
 	"bilibili-ticket-golang/lib/utils"
-	"encoding/base64"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sync"
@@ -314,12 +310,6 @@ func (c *BiliClient) GetInfocUUID() string {
 	return c.infocUUID
 }
 
-// IsDebug returns whether debug mode is enabled.
-// Both frontend and backend use this to control verbose logging.
-func (c *BiliClient) IsDebug() bool {
-	return global.Debug
-}
-
 // GetAppVersion returns the current Bilibili app version info.
 func (c *BiliClient) GetAppVersion() *api.BiliAppVersionStruct {
 	return c.appVersion
@@ -360,24 +350,6 @@ func (c *BiliClient) GetCookieJar() http.CookieJar {
 	return c.cookieJar
 }
 
-// CheckForUpdate queries GitHub for the latest release and compares it with
-// the running build's commit hash. Returns an UpdateInfo struct serializable to JSON.
-func (c *BiliClient) CheckForUpdate() *githubutils.UpdateInfo {
-	checker := githubutils.NewChecker(
-		"firefly001988",
-		"bilibili-ticket-golang",
-		global.GitCommit,
-	)
-	info, err := checker.CheckForUpdate()
-	if err != nil {
-		return &githubutils.UpdateInfo{
-			HasUpdate:      false,
-			CurrentVersion: global.GitCommit,
-		}
-	}
-	return info
-}
-
 // getBuvid34AndBnut fetches buvid3 and buvid4 cookies from Bilibili after login.
 func (c *BiliClient) getBuvid34AndBnut() error {
 	// First visit to get initial cookies
@@ -415,43 +387,4 @@ func (c *BiliClient) getUID() string {
 		}
 	}
 	return ""
-}
-
-// FetchAvatar downloads the avatar image from the given URL (with Bilibili
-// Referer to bypass hotlink protection) and returns a base64 data URI.
-// Returns empty string if the fetch fails.
-func (c *BiliClient) FetchAvatar(faceURL string) string {
-	if faceURL == "" {
-		return ""
-	}
-
-	req, err := http.NewRequest("GET", faceURL, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("Referer", "https://www.bilibili.com/")
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-
-	// Read up to 512KB
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-	if err != nil || len(body) == 0 {
-		return ""
-	}
-
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "image/jpeg"
-	}
-
-	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(body)
 }

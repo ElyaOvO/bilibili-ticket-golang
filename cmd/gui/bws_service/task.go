@@ -1,4 +1,4 @@
-package scheduler
+package bws_service
 
 import (
 	"bilibili-ticket-golang/cmd/gui/i18n"
@@ -170,7 +170,7 @@ func (t *BWSTask) UpdateStartDelay(newDelay time.Duration) {
 	t.config.StartDelayMs = int(newDelay.Milliseconds())
 }
 
-func (t *BWSTask) rescheduleWithNewOffset(offsetDelta time.Duration) {
+func (t *BWSTask) RescheduleWithNewOffset(offsetDelta time.Duration) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 	if t.GetStat() != StatWaiting || t.timer == nil {

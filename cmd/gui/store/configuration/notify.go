@@ -1,7 +1,7 @@
 package configuration
 
 import (
-	"bilibili-ticket-golang/lib/biliutils/notify"
+	"bilibili-ticket-golang/lib/notify"
 	"fmt"
 	"sync"
 )
@@ -42,15 +42,13 @@ func (nc *NotifyChannel) applyDefaults() map[string]string {
 	for k, v := range nc.Params {
 		result[k] = v
 	}
-	// Apply defaults from metadata for missing keys
-	for _, ct := range notify.GetNotifyChannelTypes() {
-		if ct.Type == nc.Type {
-			for _, f := range ct.Fields {
-				if _, ok := result[f.Key]; !ok && f.Default != "" {
-					result[f.Key] = f.Default
-				}
-			}
-			break
+	// Transport defaults belong to configuration, not GUI form metadata.
+	if _, ok := result["endpoint"]; !ok {
+		switch notify.ConvertNotificationType(nc.Type) {
+		case notify.Bark:
+			result["endpoint"] = "https://api.day.app"
+		case notify.Ntfy:
+			result["endpoint"] = "https://ntfy.sh"
 		}
 	}
 	return result

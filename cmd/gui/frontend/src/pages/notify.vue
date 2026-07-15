@@ -9,7 +9,7 @@ import {
     UpdateNotifyChannel,
     TestNotifyChannel,
     GetNotifyChannelTypes,
-} from '../../bindings/bilibili-ticket-golang/lib/biliutils/scheduler/schedulerservice'
+} from '../../bindings/bilibili-ticket-golang/cmd/gui/notify_service/notifyservice'
 import type { FrontendNotifyChannel, NotifyChannelTypeMeta, NotifyChannelFieldMeta } from '@/composables/schedulerTypes'
 
 const { t } = useI18n()

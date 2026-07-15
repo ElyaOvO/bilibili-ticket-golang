@@ -2,14 +2,18 @@ package main
 
 import (
 	clusterstorage "bilibili-ticket-golang/cluster/storage"
+	"bilibili-ticket-golang/cmd/gui/bws_service"
 	"bilibili-ticket-golang/cmd/gui/cluster_service"
 	"bilibili-ticket-golang/cmd/gui/i18n"
+	"bilibili-ticket-golang/cmd/gui/notify_service"
 	"bilibili-ticket-golang/cmd/gui/store/configuration"
 	"bilibili-ticket-golang/cmd/gui/store/cookiejar"
 	"bilibili-ticket-golang/lib/biliutils"
-	"bilibili-ticket-golang/lib/biliutils/notify"
-	"bilibili-ticket-golang/lib/biliutils/scheduler"
 	"bilibili-ticket-golang/lib/global"
+	"bilibili-ticket-golang/lib/logfile"
+	"bilibili-ticket-golang/lib/notify"
+	"bilibili-ticket-golang/lib/tasklog"
+	"bilibili-ticket-golang/lib/terminal"
 	"bytes"
 	"context"
 	"embed"
@@ -31,17 +35,36 @@ import (
 var assets embed.FS
 
 func init() {
-	application.RegisterEvent[scheduler.LogEntry]("ticket:log")
+	application.RegisterEvent[tasklog.LogEntry]("ticket:log")
 }
 
 func main() {
+	relaunched, terminalErr := terminal.Ensure()
+	if terminalErr != nil {
+		fmt.Fprintf(os.Stderr, "[terminal] %v\n", terminalErr)
+	}
+	if relaunched {
+		return
+	}
+
+	consoleOut := os.Stdout
+	consoleErr := os.Stderr
+	terminalAttached := terminal.Attached()
+
 	// Pipe stdout + stderr to main.log for post-mortem debugging.
-	logFile, err := os.OpenFile("logs/main.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	logFile, archivedLog, err := logfile.OpenRotating("logs/main.log")
 	if err == nil {
 		defer logFile.Close()
 		tw := &timestampWriter{w: logFile}
-		log.SetOutput(tw)
+		if terminalAttached {
+			log.SetOutput(io.MultiWriter(tw, consoleErr))
+		} else {
+			log.SetOutput(tw)
+		}
 		log.SetFlags(0) // timestampWriter handles the timestamp prefix
+		if archivedLog != "" {
+			log.Printf("[main] previous log archived to %s", archivedLog)
+		}
 
 		// Redirect os.Stdout / os.Stderr through pipes so that println and
 		// third-party libraries writing to stdout/stderr are captured.
@@ -53,15 +76,21 @@ func main() {
 		} else {
 			os.Stdout = wOut
 			os.Stderr = wErr
+			stdoutTarget := io.Writer(tw)
+			stderrTarget := io.Writer(tw)
+			if terminalAttached {
+				stdoutTarget = io.MultiWriter(tw, consoleOut)
+				stderrTarget = io.MultiWriter(tw, consoleErr)
+			}
 			var wg sync.WaitGroup
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				_, _ = io.Copy(tw, rOut)
+				_, _ = io.Copy(stdoutTarget, rOut)
 			}()
 			go func() {
 				defer wg.Done()
-				_, _ = io.Copy(tw, rErr)
+				_, _ = io.Copy(stderrTarget, rErr)
 			}()
 			// On exit, close writers (so the io.Copy goroutines can drain
 			// remaining buffered data) and wait for them to finish.
@@ -73,6 +102,19 @@ func main() {
 		}
 	} else {
 		log.SetOutput(os.Stderr)
+		log.Printf("[main] failed to initialise log rotation: %v", err)
+	}
+
+	_, err = terminal.ConfirmOnce(terminal.ConfirmationOptions{
+		MarkerPath:     "data/.verified",
+		RequiredText:   "黄牛死全家",
+		Prompt:         "本工具仅供个人学习交流使用，严禁倒卖。\n请输入「黄牛死全家」后按回车继续：",
+		RetryMessage:   "输入内容不正确，请重新输入。",
+		SuccessMessage: "验证完成，正在启动图形界面……",
+	})
+	if err != nil {
+		log.Printf("[main] terminal verification failed: %v", err)
+		return
 	}
 
 	// Create an instance of the app structure
@@ -127,12 +169,13 @@ func main() {
 	}
 
 	// Log broker for real-time task log streaming to the frontend
-	logStorage := scheduler.NewLogStorage()
+	logStorage := tasklog.NewLogStorage()
 	if err := logStorage.Load(); err != nil {
 		log.Printf("[main] Failed to load persisted logs: %v", err)
 	}
 
-	logBroker := scheduler.NewLogBroker(logStorage)
+	logBroker := tasklog.NewLogBroker(logStorage)
+	logService := NewTaskLogService(logBroker)
 
 	// Build MultiNotifier from persisted notification channels
 	notifier := notify.NewMultiNotifier()
@@ -150,22 +193,21 @@ func main() {
 		log.Fatalf("[main] 启动集群服务失败: %v", err)
 	}
 
-	// Scheduler service — BWS (Bilibili World) reservations and
-	// notification‑channel management.
-	schedSvc := scheduler.NewSchedulerService(c, logBroker, store.BWSData, notifier, store.NotifyChData, store)
+	bwsSvc := bws_service.New(c, logBroker, store.BWSData, notifier, store)
+	notifySvc := notify_service.New(notifier, store.NotifyChData, store)
 
 	// App instance for frontend verification & misc utilities
 	app := NewAppWithClientAndStore(c, store)
 
 	defer func() {
-		schedSvc.Close()
+		bwsSvc.Close()
 		clusterSvc.Close()
 		c.PersistCookies()
 		logBroker.FlushLogs()
 	}()
 
 	// Recover persisted BWS reservations on startup.
-	schedSvc.ReloadBWSTasks()
+	bwsSvc.ReloadBWSTasks()
 
 	// Keep tickets persisted on change
 	store.TicketData.SetChangeCallback(func(_ configuration.TicketEntry) {
@@ -219,8 +261,7 @@ func main() {
 		// human-readable hint — instead of the default opaque "0".
 		MarshalError: global.MarshalError,
 	})
-	logBroker.SetApp(wailsApp)
-	schedSvc.SetApp(wailsApp)
+	logBroker.SetEmitter(func(event string, data any) { wailsApp.Event.Emit(event, data) })
 	app.SetApp(wailsApp)
 	clusterSvc.SetApp(wailsApp)
 
@@ -228,8 +269,9 @@ func main() {
 	wailsApp.RegisterService(application.NewService(app))
 	wailsApp.RegisterService(application.NewService(clusterSvc))
 	wailsApp.RegisterService(application.NewService(c))
-	wailsApp.RegisterService(application.NewService(logBroker))
-	wailsApp.RegisterService(application.NewService(schedSvc))
+	wailsApp.RegisterService(application.NewService(logService))
+	wailsApp.RegisterService(application.NewService(bwsSvc))
+	wailsApp.RegisterService(application.NewService(notifySvc))
 
 	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "bilibili-ticket-golang",

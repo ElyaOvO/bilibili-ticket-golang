@@ -16,9 +16,6 @@ var (
 // DefaultIntervalMs is the default polling interval between submit attempts (ms).
 const DefaultIntervalMs = 500
 
-// DefaultRingCapacity is the default number of log entries kept per task in memory.
-const DefaultRingCapacity = 1000
-
 // FrontVersion is the bilibili mall frontend version string sent in API requests.
 const FrontVersion = "134"
 

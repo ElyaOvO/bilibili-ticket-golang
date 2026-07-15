@@ -25,5 +25,5 @@ type ITask interface {
 	GetError() error
 	UpdateInterval(newInterval time.Duration)
 	UpdateStartDelay(newDelay time.Duration)
-	rescheduleWithNewOffset(offsetDelta time.Duration)
+	RescheduleWithNewOffset(offsetDelta time.Duration)
 }

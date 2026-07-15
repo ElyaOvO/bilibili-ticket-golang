@@ -21,7 +21,7 @@ func (t *schedulerTestTask) GetStat() RunningStat                  { return t.st
 func (t *schedulerTestTask) GetError() error                       { return nil }
 func (t *schedulerTestTask) UpdateInterval(time.Duration)          {}
 func (t *schedulerTestTask) UpdateStartDelay(time.Duration)        {}
-func (t *schedulerTestTask) rescheduleWithNewOffset(time.Duration) {}
+func (t *schedulerTestTask) RescheduleWithNewOffset(time.Duration) {}
 
 func TestCompleteTaskReleasesTerminalTask(t *testing.T) {
 	scheduler := NewDynamicScheduler()

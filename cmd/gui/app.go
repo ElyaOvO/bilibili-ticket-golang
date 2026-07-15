@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"time"
 
 	api "bilibili-ticket-golang/lib/models/bili/api"
@@ -48,22 +47,6 @@ func NewAppWithClient(c *biliutils.BiliClient) *App {
 // NewAppWithClientAndStore creates an App with BiliClient and DataStorage for locale persistence.
 func NewAppWithClientAndStore(c *biliutils.BiliClient, store *configuration.DataStorage) *App {
 	return &App{bili: c, store: store}
-}
-
-// IsVerified checks whether the anti-scalper declaration has been accepted.
-func (a *App) IsVerified() bool {
-	_, err := os.Stat("data/.verified")
-	return err == nil
-}
-
-// Verify accepts the anti-scalper declaration. Returns true if the input
-// matches the required phrase and persistence succeeds.
-func (a *App) Verify(input string) bool {
-	if input != "黄牛死全家" {
-		return false
-	}
-	os.MkdirAll("data", 0755)
-	return os.WriteFile("data/.verified", []byte("1"), 0644) == nil
 }
 
 // TestFaultError triggers a test Fault error for verifying the frontend error
