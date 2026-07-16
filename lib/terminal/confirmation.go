@@ -71,6 +71,15 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 	if input == nil {
 		input = os.Stdin
 	}
+	restoreInput, utf8Err := enableUTF8Input(input)
+	if utf8Err != nil {
+		return true, fmt.Errorf("enable UTF-8 terminal input: %w", utf8Err)
+	}
+	defer func() {
+		if restoreErr := restoreInput(); err == nil && restoreErr != nil {
+			err = fmt.Errorf("restore terminal input: %w", restoreErr)
+		}
+	}()
 	output := options.Output
 	if output == nil {
 		output = os.Stdout
