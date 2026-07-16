@@ -1,7 +1,6 @@
 package terminal
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -94,9 +93,17 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 	}
 	rewriteOnRetry := options.RewriteOnRetry && ansiEnabled
 	colorMode := detectTerminalColorMode(ansiEnabled)
+	lineInput, restoreLineInput, lineInputErr := newConfirmationLineInput(input, output)
+	if lineInputErr != nil {
+		return true, fmt.Errorf("prepare confirmation line input: %w", lineInputErr)
+	}
+	defer func() {
+		if restoreErr := restoreLineInput(); err == nil && restoreErr != nil {
+			err = fmt.Errorf("restore confirmation line input: %w", restoreErr)
+		}
+	}()
 
 	message := options.Prompt
-	scanner := bufio.NewScanner(input)
 	for {
 		if message != "" {
 			displayMessage := renderStyledTextWithColorMode(message, styledColorMode(options.StyledText, colorMode))
@@ -104,13 +111,14 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 				return true, fmt.Errorf("write confirmation message: %w", err)
 			}
 		}
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return true, fmt.Errorf("read confirmation: %w", err)
+		line, readErr := lineInput.ReadLine()
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return true, io.EOF
 			}
-			return true, io.EOF
+			return true, fmt.Errorf("read confirmation: %w", readErr)
 		}
-		if strings.TrimSpace(scanner.Text()) != options.RequiredText {
+		if strings.TrimSpace(line) != options.RequiredText {
 			message = options.RetryMessage
 			if rewriteOnRetry && message != "" {
 				if _, err := fmt.Fprint(output, ansiRewritePreviousLine); err != nil {
