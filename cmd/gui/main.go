@@ -44,6 +44,7 @@ func main() {
 	relaunched, terminalErr := terminal.Ensure()
 	if terminalErr != nil {
 		fmt.Fprintf(os.Stderr, "[terminal] %v\n", terminalErr)
+		return
 	}
 	if relaunched {
 		return
@@ -113,6 +114,7 @@ func main() {
 		Prompt:         privacyTOSPrompt,
 		RetryMessage:   "未确认隐私与遥测条款。若不同意，请关闭终端退出；若同意，请输入「我已阅读并同意」。",
 		SuccessMessage: "隐私与遥测条款已确认。接下来进入使用规范确认。",
+		Output:         consoleOut,
 	})
 	if err != nil {
 		log.Printf("[main] privacy ToS confirmation failed: %v", err)
@@ -125,6 +127,7 @@ func main() {
 		Prompt:         "本工具仅供个人学习交流使用，严禁倒卖。\n请输入「黄牛死全家」后按回车继续：",
 		RetryMessage:   "输入内容不正确，请重新输入。",
 		SuccessMessage: "验证完成，正在启动图形界面……",
+		Output:         consoleOut,
 	})
 	if err != nil {
 		log.Printf("[main] terminal verification failed: %v", err)

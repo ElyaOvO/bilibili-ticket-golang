@@ -39,7 +39,7 @@ func TestOpenRotatingAtArchivesPreviousLog(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = file.Close() })
 
-	wantArchive := filepath.Join(root, "logs", "old", "2026-15-07 13-14-15.log")
+	wantArchive := filepath.Join(root, "logs", "old", "2026-07-15 13-14-15.log")
 	if archived != wantArchive {
 		t.Fatalf("archived = %q, want %q", archived, wantArchive)
 	}
@@ -67,7 +67,7 @@ func TestOpenRotatingAtDoesNotOverwriteSameSecondArchive(t *testing.T) {
 	if err := os.MkdirAll(archiveDirectory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	existingArchive := filepath.Join(archiveDirectory, "2026-15-07 13-14-15.log")
+	existingArchive := filepath.Join(archiveDirectory, "2026-07-15 13-14-15.log")
 	if err := os.WriteFile(existingArchive, []byte("first"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestOpenRotatingAtDoesNotOverwriteSameSecondArchive(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = file.Close() })
 
-	wantArchive := filepath.Join(archiveDirectory, "2026-15-07 13-14-15-2.log")
+	wantArchive := filepath.Join(archiveDirectory, "2026-07-15 13-14-15-2.log")
 	if archived != wantArchive {
 		t.Fatalf("archived = %q, want %q", archived, wantArchive)
 	}

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const archiveTimeLayout = "2006-02-01 15-04-05"
+const archiveTimeLayout = "2006-01-02 15-04-05"
 
 // OpenRotating moves an existing log into an "old" directory next to it and
 // opens a fresh log file. Archived contains the destination path when a file
