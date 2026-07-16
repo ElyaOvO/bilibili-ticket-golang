@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -35,6 +37,15 @@ const (
 )
 
 var colorTagPattern = regexp.MustCompile(`\{\{#[^{}]+\}\}`)
+
+type terminalColorMode uint8
+
+const (
+	colorNone terminalColorMode = iota
+	colorANSI16
+	colorANSI256
+	colorTrue
+)
 
 type fileDescriptor interface {
 	Fd() uintptr
@@ -73,12 +84,13 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 		}
 	}
 	rewriteOnRetry := options.RewriteOnRetry && ansiEnabled
+	colorMode := detectTerminalColorMode(ansiEnabled)
 
 	message := options.Prompt
 	scanner := bufio.NewScanner(input)
 	for {
 		if message != "" {
-			displayMessage := renderStyledText(message, options.StyledText && ansiEnabled)
+			displayMessage := renderStyledTextWithColorMode(message, styledColorMode(options.StyledText, colorMode))
 			if _, err := fmt.Fprint(output, displayMessage); err != nil {
 				return true, fmt.Errorf("write confirmation message: %w", err)
 			}
@@ -106,7 +118,7 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 			return true, fmt.Errorf("persist confirmation: %w", err)
 		}
 		if options.SuccessMessage != "" {
-			displayMessage := renderStyledText(options.SuccessMessage, options.StyledText && ansiEnabled)
+			displayMessage := renderStyledTextWithColorMode(options.SuccessMessage, styledColorMode(options.StyledText, colorMode))
 			if _, err := fmt.Fprintln(output, displayMessage); err != nil {
 				return true, fmt.Errorf("write confirmation success message: %w", err)
 			}
@@ -115,14 +127,22 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 	}
 }
 
-func renderStyledText(message string, ansiEnabled bool) string {
+func styledColorMode(styled bool, mode terminalColorMode) terminalColorMode {
+	if !styled {
+		return colorNone
+	}
+	return mode
+}
+
+func renderStyledTextWithColorMode(message string, mode terminalColorMode) string {
+	ansiEnabled := mode != colorNone
 	bold := ""
 	if ansiEnabled {
 		bold = ansiBold
 	}
 	message = strings.ReplaceAll(message, "{{bold}}", bold)
 	message = colorTagPattern.ReplaceAllStringFunc(message, func(tag string) string {
-		sequence, valid := ansiFromColorTag(tag)
+		sequence, valid := ansiFromColorTag(tag, mode)
 		if !valid {
 			return tag
 		}
@@ -138,14 +158,14 @@ func renderStyledText(message string, ansiEnabled bool) string {
 	return strings.ReplaceAll(message, "{{/}}", reset)
 }
 
-func ansiFromColorTag(tag string) (string, bool) {
+func ansiFromColorTag(tag string, mode terminalColorMode) (string, bool) {
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(tag, "{{"), "}}"), "|")
 	foreground, ok := parseHexColor(parts[0])
 	if !ok {
 		return "", false
 	}
 
-	codes := []string{"38", "2", foreground[0], foreground[1], foreground[2]}
+	codes := ansiColorCodes(false, foreground, mode)
 	backgroundSet := false
 	boldSet := false
 	for _, part := range parts[1:] {
@@ -158,13 +178,143 @@ func ansiFromColorTag(tag string) (string, bool) {
 			if !valid {
 				return "", false
 			}
-			codes = append(codes, "48", "2", background[0], background[1], background[2])
+			codes = append(codes, ansiColorCodes(true, background, mode)...)
 			backgroundSet = true
 		default:
 			return "", false
 		}
 	}
 	return "\x1b[" + strings.Join(codes, ";") + "m", true
+}
+
+func ansiColorCodes(background bool, rgb [3]string, mode terminalColorMode) []string {
+	prefix := "38"
+	if background {
+		prefix = "48"
+	}
+	switch mode {
+	case colorTrue:
+		return []string{prefix, "2", rgb[0], rgb[1], rgb[2]}
+	case colorANSI256:
+		return []string{prefix, "5", strconv.Itoa(xtermColorIndex(rgb))}
+	case colorANSI16:
+		return []string{strconv.Itoa(ansi16ColorCode(rgb, background))}
+	default:
+		return nil
+	}
+}
+
+func xtermColorIndex(rgb [3]string) int {
+	red, _ := strconv.Atoi(rgb[0])
+	green, _ := strconv.Atoi(rgb[1])
+	blue, _ := strconv.Atoi(rgb[2])
+	red = (red*5 + 127) / 255
+	green = (green*5 + 127) / 255
+	blue = (blue*5 + 127) / 255
+	return 16 + 36*red + 6*green + blue
+}
+
+func ansi16ColorCode(rgb [3]string, background bool) int {
+	palette := [][3]int{
+		{0, 0, 0}, {128, 0, 0}, {0, 128, 0}, {128, 128, 0},
+		{0, 0, 128}, {128, 0, 128}, {0, 128, 128}, {192, 192, 192},
+		{128, 128, 128}, {255, 0, 0}, {0, 255, 0}, {255, 255, 0},
+		{0, 0, 255}, {255, 0, 255}, {0, 255, 255}, {255, 255, 255},
+	}
+	red, _ := strconv.Atoi(rgb[0])
+	green, _ := strconv.Atoi(rgb[1])
+	blue, _ := strconv.Atoi(rgb[2])
+	bestIndex := 0
+	bestDistance := int(^uint(0) >> 1)
+	for index, color := range palette {
+		distance := square(red-color[0]) + square(green-color[1]) + square(blue-color[2])
+		if distance < bestDistance {
+			bestIndex = index
+			bestDistance = distance
+		}
+	}
+	base := 30
+	if background {
+		base = 40
+	}
+	if bestIndex >= 8 {
+		base += 60
+		bestIndex -= 8
+	}
+	return base + bestIndex
+}
+
+func square(value int) int {
+	return value * value
+}
+
+func detectTerminalColorMode(ansiEnabled bool) terminalColorMode {
+	if !ansiEnabled {
+		return colorNone
+	}
+	if runtime.GOOS == "windows" {
+		return colorTrue
+	}
+
+	termProgram := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	if termProgram == "apple_terminal" {
+		if mode := terminfoColorMode(); mode != colorNone {
+			return mode
+		}
+		return colorANSI256
+	}
+	if termProgram == "iterm.app" || termProgram == "wezterm" ||
+		termProgram == "vscode" || termProgram == "ghostty" {
+		return colorTrue
+	}
+	colorTerm := strings.ToLower(os.Getenv("COLORTERM"))
+	if colorTerm == "truecolor" || colorTerm == "24bit" {
+		return colorTrue
+	}
+	if mode := terminfoColorMode(); mode != colorNone {
+		return mode
+	}
+	term := strings.ToLower(os.Getenv("TERM"))
+	if term == "dumb" {
+		return colorNone
+	}
+	if strings.Contains(term, "truecolor") || strings.Contains(term, "24bit") ||
+		strings.Contains(term, "direct") || strings.Contains(term, "kitty") ||
+		strings.Contains(term, "alacritty") {
+		return colorTrue
+	}
+	if strings.Contains(term, "256color") {
+		return colorANSI256
+	}
+	return colorANSI16
+}
+
+func terminfoColorMode() terminalColorMode {
+	if runtime.GOOS == "windows" || os.Getenv("TERM") == "" {
+		return colorNone
+	}
+	output, err := exec.Command("tput", "colors").Output()
+	if err != nil {
+		return colorNone
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return colorNone
+	}
+	return colorModeFromCount(count)
+}
+
+func colorModeFromCount(count int) terminalColorMode {
+	switch {
+	case count >= 1<<24:
+		return colorTrue
+	case count >= 256:
+		return colorANSI256
+	case count > 0:
+		return colorANSI16
+	default:
+		return colorNone
+	}
 }
 
 func parseHexColor(value string) ([3]string, bool) {
