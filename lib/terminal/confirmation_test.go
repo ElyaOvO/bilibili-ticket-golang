@@ -17,7 +17,8 @@ func TestConfirmOnceRetriesAndPersistsMarker(t *testing.T) {
 		MarkerPath:     marker,
 		RequiredText:   "required phrase",
 		Prompt:         "input: ",
-		RetryMessage:   "retry",
+		RetryMessage:   "retry: ",
+		RewriteOnRetry: true,
 		SuccessMessage: "success",
 		Input:          strings.NewReader("wrong\nrequired phrase\n"),
 		Output:         &output,
@@ -28,7 +29,7 @@ func TestConfirmOnceRetriesAndPersistsMarker(t *testing.T) {
 	if !prompted {
 		t.Fatal("ConfirmOnce() prompted = false, want true")
 	}
-	if got := output.String(); got != "input: retry\ninput: success\n" {
+	if got := output.String(); got != "input: retry: success\n" {
 		t.Fatalf("output = %q", got)
 	}
 	contents, err := os.ReadFile(marker)
@@ -79,5 +80,18 @@ func TestConfirmOnceReturnsEOFWithoutMarker(t *testing.T) {
 	}
 	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("marker unexpectedly exists: %v", statErr)
+	}
+}
+
+func TestRenderStyledText(t *testing.T) {
+	message := "{{bold}}heading{{/}} {{#ffffff}}white{{/}} {{#000000|#facc15|bold}}input{{/}}"
+	wantANSI := ansiBold + "heading" + ansiReset + " " +
+		"\x1b[38;2;255;255;255mwhite" + ansiReset + " " +
+		"\x1b[1;38;2;0;0;0;48;2;250;204;21minput" + ansiReset
+	if got := renderStyledText(message, true); got != wantANSI {
+		t.Fatalf("renderStyledText(ANSI) = %q, want %q", got, wantANSI)
+	}
+	if got := renderStyledText(message, false); got != "heading white input" {
+		t.Fatalf("renderStyledText(plain) = %q", got)
 	}
 }

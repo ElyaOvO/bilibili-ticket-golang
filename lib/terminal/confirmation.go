@@ -7,19 +7,37 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
 // ConfirmationOptions configures a one-time exact-text confirmation in the
 // terminal. Input and Output default to os.Stdin and os.Stdout.
 type ConfirmationOptions struct {
-	MarkerPath     string
-	RequiredText   string
-	Prompt         string
-	RetryMessage   string
+	MarkerPath   string
+	RequiredText string
+	Prompt       string
+	RetryMessage string
+	// RewriteOnRetry replaces the previous terminal line with RetryMessage.
+	RewriteOnRetry bool
+	// StyledText renders supported inline style tags as ANSI sequences.
+	StyledText     bool
 	SuccessMessage string
 	Input          io.Reader
 	Output         io.Writer
+}
+
+const (
+	ansiRewritePreviousLine = "\x1b[1A\x1b[2K\r"
+	ansiBold                = "\x1b[1;7m"
+	ansiReset               = "\x1b[0m"
+)
+
+var colorTagPattern = regexp.MustCompile(`\{\{#[^{}]+\}\}`)
+
+type fileDescriptor interface {
+	Fd() uintptr
 }
 
 // ConfirmOnce skips input when MarkerPath already exists. Otherwise it keeps
@@ -46,12 +64,23 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 	if output == nil {
 		output = os.Stdout
 	}
+	ansiEnabled := false
+	if options.RewriteOnRetry || options.StyledText {
+		var err error
+		ansiEnabled, err = enableANSI(output)
+		if err != nil {
+			return true, fmt.Errorf("enable ANSI confirmation output: %w", err)
+		}
+	}
+	rewriteOnRetry := options.RewriteOnRetry && ansiEnabled
 
+	message := options.Prompt
 	scanner := bufio.NewScanner(input)
 	for {
-		if options.Prompt != "" {
-			if _, err := fmt.Fprint(output, options.Prompt); err != nil {
-				return true, fmt.Errorf("write confirmation prompt: %w", err)
+		if message != "" {
+			displayMessage := renderStyledText(message, options.StyledText && ansiEnabled)
+			if _, err := fmt.Fprint(output, displayMessage); err != nil {
+				return true, fmt.Errorf("write confirmation message: %w", err)
 			}
 		}
 		if !scanner.Scan() {
@@ -61,9 +90,10 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 			return true, io.EOF
 		}
 		if strings.TrimSpace(scanner.Text()) != options.RequiredText {
-			if options.RetryMessage != "" {
-				if _, err := fmt.Fprintln(output, options.RetryMessage); err != nil {
-					return true, fmt.Errorf("write confirmation retry message: %w", err)
+			message = options.RetryMessage
+			if rewriteOnRetry && message != "" {
+				if _, err := fmt.Fprint(output, ansiRewritePreviousLine); err != nil {
+					return true, fmt.Errorf("rewrite confirmation line: %w", err)
 				}
 			}
 			continue
@@ -76,10 +106,78 @@ func ConfirmOnce(options ConfirmationOptions) (prompted bool, err error) {
 			return true, fmt.Errorf("persist confirmation: %w", err)
 		}
 		if options.SuccessMessage != "" {
-			if _, err := fmt.Fprintln(output, options.SuccessMessage); err != nil {
+			displayMessage := renderStyledText(options.SuccessMessage, options.StyledText && ansiEnabled)
+			if _, err := fmt.Fprintln(output, displayMessage); err != nil {
 				return true, fmt.Errorf("write confirmation success message: %w", err)
 			}
 		}
 		return true, nil
 	}
+}
+
+func renderStyledText(message string, ansiEnabled bool) string {
+	bold := ""
+	if ansiEnabled {
+		bold = ansiBold
+	}
+	message = strings.ReplaceAll(message, "{{bold}}", bold)
+	message = colorTagPattern.ReplaceAllStringFunc(message, func(tag string) string {
+		sequence, valid := ansiFromColorTag(tag)
+		if !valid {
+			return tag
+		}
+		if ansiEnabled {
+			return sequence
+		}
+		return ""
+	})
+	reset := ""
+	if ansiEnabled {
+		reset = ansiReset
+	}
+	return strings.ReplaceAll(message, "{{/}}", reset)
+}
+
+func ansiFromColorTag(tag string) (string, bool) {
+	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(tag, "{{"), "}}"), "|")
+	foreground, ok := parseHexColor(parts[0])
+	if !ok {
+		return "", false
+	}
+
+	codes := []string{"38", "2", foreground[0], foreground[1], foreground[2]}
+	backgroundSet := false
+	boldSet := false
+	for _, part := range parts[1:] {
+		switch {
+		case part == "bold" && !boldSet:
+			codes = append([]string{"1"}, codes...)
+			boldSet = true
+		case strings.HasPrefix(part, "#") && !backgroundSet:
+			background, valid := parseHexColor(part)
+			if !valid {
+				return "", false
+			}
+			codes = append(codes, "48", "2", background[0], background[1], background[2])
+			backgroundSet = true
+		default:
+			return "", false
+		}
+	}
+	return "\x1b[" + strings.Join(codes, ";") + "m", true
+}
+
+func parseHexColor(value string) ([3]string, bool) {
+	var rgb [3]string
+	if len(value) != 7 || value[0] != '#' {
+		return rgb, false
+	}
+	for index := range rgb {
+		component, err := strconv.ParseUint(value[1+index*2:3+index*2], 16, 8)
+		if err != nil {
+			return rgb, false
+		}
+		rgb[index] = strconv.FormatUint(component, 10)
+	}
+	return rgb, true
 }

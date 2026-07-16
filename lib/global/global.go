@@ -9,8 +9,8 @@ var (
 
 	// Reporting settings are injected at build time with -ldflags -X. All four
 	// values must be present and valid, otherwise the no-op reporter is used.
-	ReportDSN          = "http://not-valid:sus@example.com"
-	ReportSalt         = "replace-with-a-long-random-secret"
+	ReportDSN          = ""
+	ReportSalt         = ""
 	ReportTimeout      = "5s"
 	ReportSkipSSLCheck = "false"
 

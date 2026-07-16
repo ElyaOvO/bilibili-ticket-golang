@@ -36,6 +36,37 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+const privacyTOSPrompt = `
+{{#ffffff|#303f9f|bold}}================ 隐私与遥测说明（ToS v1） ================{{/}}
+
+本程序启用云控与远程诊断。只有在你确认本条款后，远程上报才会初始化。
+
+{{#90caf9|bold}}【会远程上报的内容】{{/}}
+{{bold}}1. 设备标识：{{/}}由系统 UUID、主板/BIOS/硬盘等可用硬件标识计算出的稳定机器码。
+   服务器收到的是派生后的机器码，不是原始序列号、原始 MAC 地址或完整硬件清单。
+{{bold}}2. 程序信息：{{/}}程序版本、Git Commit、事件时间；上报服务器在网络层也可能看到来源 IP。
+{{bold}}3. 操作事件：{{/}}启动/退出、登录方式、账号/购买人、任务、BWS、Worker、设置和通知等
+   固定 ACTION 名称。ACTION 不携带按钮参数、账号名、手机号、项目号或 Worker ID。
+{{bold}}4. 登录事件：{{/}}登录成功后的 Bilibili UID，以及是否为已存在账号的重新登录。
+{{bold}}5. 错误诊断：{{/}}错误码、业务操作、分类、上游状态码、重试属性、指纹，以及经过脱敏和
+   长度限制的错误消息/原因链；不上传源码文件路径和行号。
+{{bold}}6. 任务日志：{{/}}任务 ID、日志级别、时间和日志消息。日志消息可能包含项目/活动信息、
+   票号、接口状态和上游返回文本，因此{{#ffffff|#d32f2f|bold}}任务日志不应被视为匿名数据{{/}}。
+
+{{#90caf9|bold}}【不会作为遥测字段主动上报的内容】{{/}}
+1. Bilibili 登录密码、短信验证码、图形验证码答案。
+2. Cookie、SESSDATA、bili_jct、refresh/access token、OAuth code 等登录凭据。
+3. 原始系统 UUID、主板/BIOS/硬盘序列号、原始 MAC 地址和完整显卡信息。
+4. 本地配置文件、数据库、Cookie 仓库或日志文件的完整副本。
+5. 购买人身份证、手机号和姓名不会作为独立遥测字段上传；但若第三方接口把这些内容
+   写入错误文本或任务日志，程序会尽力脱敏，仍不能保证所有非标准文本均可识别。
+
+{{#90caf9|bold}}【本地保存】{{/}}
+配置、账号凭据、数据库和运行日志会保存在运行目录下的 data、logs 等目录，用于程序运行。
+
+{{#ffffff|#d32f2f|bold}}如果不同意，请直接关闭终端退出。{{/}}
+如已阅读并同意以上内容，请输入{{#212121|#ffa000|bold}}「我已阅读并同意」{{/}}后按回车：`
+
 func init() {
 	application.RegisterEvent[tasklog.LogEntry]("ticket:log")
 }
@@ -58,11 +89,16 @@ func main() {
 		MarkerPath:     "data/.privacy-tos-v1.accepted",
 		RequiredText:   "我已阅读并同意",
 		Prompt:         privacyTOSPrompt,
-		RetryMessage:   "未确认隐私与遥测条款。若不同意，请关闭终端退出；若同意，请输入「我已阅读并同意」。",
-		SuccessMessage: "隐私与遥测条款已确认。接下来进入使用规范确认。",
+		RetryMessage:   "{{#212121|#f57c00|bold}}未确认隐私与遥测条款。若不同意，请关闭终端退出；若同意，请输入「我已阅读并同意」：{{/}}",
+		RewriteOnRetry: true,
+		StyledText:     true,
+		SuccessMessage: "\n{{#ffffff|#2e7d32|bold}}隐私与遥测条款已确认。接下来进入使用规范确认。{{/}}\n",
 		Output:         consoleOut,
 	})
 	if err != nil {
+		if err == io.EOF {
+			return
+		}
 		fmt.Fprintf(consoleErr, "[main] privacy ToS confirmation failed: %v\n", err)
 		return
 	}
@@ -70,12 +106,17 @@ func main() {
 	_, err = terminal.ConfirmOnce(terminal.ConfirmationOptions{
 		MarkerPath:     "data/.verified",
 		RequiredText:   "黄牛死全家",
-		Prompt:         "本工具仅供个人学习交流使用，严禁倒卖。\n请输入「黄牛死全家」后按回车继续：",
-		RetryMessage:   "输入内容不正确，请重新输入。",
-		SuccessMessage: "验证完成，正在启动图形界面……",
+		Prompt:         "本工具仅供个人学习交流使用，{{#ffffff|#d32f2f|bold}}严禁倒卖{{/}}。\nGithub Repo: https://github.com/It-s-bilibili-ticket-golang/bilibili-ticket-golang\n请输入{{#212121|#ffa000|bold}}「黄牛死全家」{{/}}后按回车继续：",
+		RetryMessage:   "{{#212121|#f57c00|bold}}输入内容不正确，请重新输入：{{/}}",
+		RewriteOnRetry: true,
+		StyledText:     true,
+		SuccessMessage: "\n{{#ffffff|#2e7d32|bold}}验证完成，正在启动图形界面……{{/}}\n",
 		Output:         consoleOut,
 	})
 	if err != nil {
+		if err == io.EOF {
+			return
+		}
 		fmt.Fprintf(consoleErr, "[main] terminal verification failed: %v\n", err)
 		return
 	}
@@ -329,37 +370,6 @@ func main() {
 		log.Printf("[main] Error: %v", err)
 	}
 }
-
-const privacyTOSPrompt = `
-================ 隐私与遥测说明（ToS v1） ================
-
-本程序启用云控与远程诊断。只有在你确认本条款后，远程上报才会初始化。
-
-【会远程上报的内容】
-1. 设备标识：由系统 UUID、主板/BIOS/硬盘等可用硬件标识计算出的稳定机器码。
-   服务器收到的是派生后的机器码，不是原始序列号、原始 MAC 地址或完整硬件清单。
-2. 程序信息：程序版本、Git Commit、事件时间；上报服务器在网络层也可能看到来源 IP。
-3. 操作事件：启动/退出、登录方式、账号/购买人、任务、BWS、Worker、设置和通知等
-   固定 ACTION 名称。ACTION 不携带按钮参数、账号名、手机号、项目号或 Worker ID。
-4. 登录事件：登录成功后的 Bilibili UID，以及是否为已存在账号的重新登录。
-5. 错误诊断：错误码、业务操作、分类、上游状态码、重试属性、指纹，以及经过脱敏和
-   长度限制的错误消息/原因链；不上传源码文件路径和行号。
-6. 任务日志：任务 ID、日志级别、时间和日志消息。日志消息可能包含项目/活动信息、
-   票号、接口状态和上游返回文本，因此任务日志不应被视为匿名数据。
-
-【不会作为遥测字段主动上报的内容】
-1. Bilibili 登录密码、短信验证码、图形验证码答案。
-2. Cookie、SESSDATA、bili_jct、refresh/access token、OAuth code 等登录凭据。
-3. 原始系统 UUID、主板/BIOS/硬盘序列号、原始 MAC 地址和完整显卡信息。
-4. 本地配置文件、数据库、Cookie 仓库或日志文件的完整副本。
-5. 购买人身份证、手机号和姓名不会作为独立遥测字段上传；但若第三方接口把这些内容
-   写入错误文本或任务日志，程序会尽力脱敏，仍不能保证所有非标准文本均可识别。
-
-【本地保存】
-配置、账号凭据、数据库和运行日志会保存在本机 data/、logs/ 等目录，用于程序运行。
-
-如果不同意，请直接关闭终端退出。
-如已阅读并同意以上内容，请输入「我已阅读并同意」后按回车：`
 
 // makeCaptchaTester wraps the solver into a CaptchaTester that fetches a live
 // captcha from Bilibili and tests the solver. Used by the local worker manager.
