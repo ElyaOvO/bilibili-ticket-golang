@@ -34,3 +34,20 @@ func enableUTF8Input(input io.Reader) (func() error, error) {
 func noInputRestore() error {
 	return nil
 }
+
+func enableInteractiveInput(fd int) (func() error, error) {
+	original, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return noInputRestore, err
+	}
+	updated := *original
+	updated.Lflag &^= unix.ICANON | unix.ECHO | unix.ISIG | unix.IEXTEN
+	updated.Cc[unix.VMIN] = 1
+	updated.Cc[unix.VTIME] = 0
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &updated); err != nil {
+		return noInputRestore, err
+	}
+	return func() error {
+		return unix.IoctlSetTermios(fd, unix.TCSETS, original)
+	}, nil
+}

@@ -23,12 +23,9 @@ func newConfirmationLineInput(input io.Reader, output io.Writer) (confirmationLi
 		return newScannerLineInput(input), noLineInputRestore, nil
 	}
 
-	state, err := term.MakeRaw(int(inputStream.Fd()))
+	restore, err := enableInteractiveInput(int(inputStream.Fd()))
 	if err != nil {
 		return nil, noLineInputRestore, err
-	}
-	restore := func() error {
-		return term.Restore(int(inputStream.Fd()), state)
 	}
 	return &rawLineInput{reader: bufio.NewReader(input), output: output}, restore, nil
 }
