@@ -54,9 +54,36 @@ func main() {
 	consoleErr := os.Stderr
 	terminalAttached := terminal.Attached()
 
-	// Pipe stdout + stderr to main.log for post-mortem debugging.
-	logFile, archivedLog, err := logfile.OpenRotating("logs/main.log")
-	if err == nil {
+	_, err := terminal.ConfirmOnce(terminal.ConfirmationOptions{
+		MarkerPath:     "data/.privacy-tos-v1.accepted",
+		RequiredText:   "我已阅读并同意",
+		Prompt:         privacyTOSPrompt,
+		RetryMessage:   "未确认隐私与遥测条款。若不同意，请关闭终端退出；若同意，请输入「我已阅读并同意」。",
+		SuccessMessage: "隐私与遥测条款已确认。接下来进入使用规范确认。",
+		Output:         consoleOut,
+	})
+	if err != nil {
+		fmt.Fprintf(consoleErr, "[main] privacy ToS confirmation failed: %v\n", err)
+		return
+	}
+
+	_, err = terminal.ConfirmOnce(terminal.ConfirmationOptions{
+		MarkerPath:     "data/.verified",
+		RequiredText:   "黄牛死全家",
+		Prompt:         "本工具仅供个人学习交流使用，严禁倒卖。\n请输入「黄牛死全家」后按回车继续：",
+		RetryMessage:   "输入内容不正确，请重新输入。",
+		SuccessMessage: "验证完成，正在启动图形界面……",
+		Output:         consoleOut,
+	})
+	if err != nil {
+		fmt.Fprintf(consoleErr, "[main] terminal verification failed: %v\n", err)
+		return
+	}
+
+	// Start local logging only after both terminal confirmations have completed.
+	// This keeps all consent prompts and input outside logs/main.log.
+	logFile, archivedLog, logErr := logfile.OpenRotating("logs/main.log")
+	if logErr == nil {
 		defer logFile.Close()
 		tw := &timestampWriter{w: logFile}
 		if terminalAttached {
@@ -71,10 +98,14 @@ func main() {
 
 		// Redirect os.Stdout / os.Stderr through pipes so that println and
 		// third-party libraries writing to stdout/stderr are captured.
-		// (In Wails desktop builds stdout/stderr are discarded by default.)
 		rOut, wOut, pipeOutErr := os.Pipe()
 		rErr, wErr, pipeErrErr := os.Pipe()
 		if pipeOutErr != nil || pipeErrErr != nil {
+			for _, stream := range []*os.File{rOut, wOut, rErr, wErr} {
+				if stream != nil {
+					_ = stream.Close()
+				}
+			}
 			log.Printf("[main] failed to create stdout/stderr pipes: out=%v err=%v", pipeOutErr, pipeErrErr)
 		} else {
 			os.Stdout = wOut
@@ -95,43 +126,16 @@ func main() {
 				defer wg.Done()
 				_, _ = io.Copy(stderrTarget, rErr)
 			}()
-			// On exit, close writers (so the io.Copy goroutines can drain
-			// remaining buffered data) and wait for them to finish.
 			defer func() {
 				_ = wOut.Close()
 				_ = wErr.Close()
 				wg.Wait()
+				_ = tw.Flush()
 			}()
 		}
 	} else {
-		log.SetOutput(os.Stderr)
-		log.Printf("[main] failed to initialise log rotation: %v", err)
-	}
-
-	_, err = terminal.ConfirmOnce(terminal.ConfirmationOptions{
-		MarkerPath:     "data/.privacy-tos-v1.accepted",
-		RequiredText:   "我已阅读并同意",
-		Prompt:         privacyTOSPrompt,
-		RetryMessage:   "未确认隐私与遥测条款。若不同意，请关闭终端退出；若同意，请输入「我已阅读并同意」。",
-		SuccessMessage: "隐私与遥测条款已确认。接下来进入使用规范确认。",
-		Output:         consoleOut,
-	})
-	if err != nil {
-		log.Printf("[main] privacy ToS confirmation failed: %v", err)
-		return
-	}
-
-	_, err = terminal.ConfirmOnce(terminal.ConfirmationOptions{
-		MarkerPath:     "data/.verified",
-		RequiredText:   "黄牛死全家",
-		Prompt:         "本工具仅供个人学习交流使用，严禁倒卖。\n请输入「黄牛死全家」后按回车继续：",
-		RetryMessage:   "输入内容不正确，请重新输入。",
-		SuccessMessage: "验证完成，正在启动图形界面……",
-		Output:         consoleOut,
-	})
-	if err != nil {
-		log.Printf("[main] terminal verification failed: %v", err)
-		return
+		log.SetOutput(consoleErr)
+		log.Printf("[main] failed to initialise log rotation: %v", logErr)
 	}
 
 	// Remote reporting starts only after both terminal confirmations. Nothing
