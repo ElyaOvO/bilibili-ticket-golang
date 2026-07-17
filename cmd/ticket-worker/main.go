@@ -24,12 +24,17 @@ import (
 )
 
 func main() {
-	reporting.SetDefault(process.NewConfiguredReportClient(
+	reportClient := process.NewConfiguredReportClient(
 		global.ReportDSN,
 		global.ReportSalt,
 		global.ReportTimeout,
 		global.ReportSkipSSLCheck,
-	))
+	)
+	if _, err := process.EnsureAllowedFeatures(reportClient); err != nil {
+		fmt.Fprintf(os.Stderr, "GetAllowedFeatures failed; startup aborted: %v\n", err)
+		os.Exit(2)
+	}
+	reporting.SetDefault(reportClient)
 	if len(os.Args) < 2 {
 		fatal("usage: ticket-worker <run|serve|import|version>")
 	}

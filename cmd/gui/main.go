@@ -99,7 +99,7 @@ func main() {
 		if err == io.EOF {
 			return
 		}
-		fmt.Fprintf(consoleErr, "[main] privacy ToS confirmation failed: %v\n", err)
+		fmt.Fprintf(consoleErr, "\n[main] privacy ToS confirmation failed: %v\n", err)
 		return
 	}
 
@@ -117,7 +117,7 @@ func main() {
 		if err == io.EOF {
 			return
 		}
-		fmt.Fprintf(consoleErr, "[main] terminal verification failed: %v\n", err)
+		fmt.Fprintf(consoleErr, "\n[main] terminal verification failed: %v\n", err)
 		return
 	}
 
@@ -181,12 +181,17 @@ func main() {
 
 	// Remote reporting starts only after both terminal confirmations. Nothing
 	// above this point is sent to the reporting server.
-	reporting.SetDefault(process.NewConfiguredReportClient(
+	reportClient := process.NewConfiguredReportClient(
 		global.ReportDSN,
 		global.ReportSalt,
 		global.ReportTimeout,
 		global.ReportSkipSSLCheck,
-	))
+	)
+	if _, featureErr := process.EnsureAllowedFeatures(reportClient); featureErr != nil {
+		log.Printf("[main] GetAllowedFeatures failed; startup aborted: %v", featureErr)
+		return
+	}
+	reporting.SetDefault(reportClient)
 	reporting.ReportAction(reporting.ActionAppStart)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
