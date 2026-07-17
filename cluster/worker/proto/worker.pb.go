@@ -573,8 +573,11 @@ type ExecutionSpec struct {
 	BwsActivityTitle string `protobuf:"bytes,22,opt,name=bws_activity_title,json=bwsActivityTitle,proto3" json:"bws_activity_title,omitempty"`
 	BwsReserveTime   int64  `protobuf:"varint,23,opt,name=bws_reserve_time,json=bwsReserveTime,proto3" json:"bws_reserve_time,omitempty"`
 	BwsReserveDate   string `protobuf:"bytes,24,opt,name=bws_reserve_date,json=bwsReserveDate,proto3" json:"bws_reserve_date,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Reporting metadata. The worker includes this together with its own
+	// machine ID when it reports task logs.
+	EmployerMachineId string `protobuf:"bytes,25,opt,name=employer_machine_id,json=employerMachineId,proto3" json:"employer_machine_id,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ExecutionSpec) Reset() {
@@ -729,6 +732,13 @@ func (x *ExecutionSpec) GetBwsReserveTime() int64 {
 func (x *ExecutionSpec) GetBwsReserveDate() string {
 	if x != nil {
 		return x.BwsReserveDate
+	}
+	return ""
+}
+
+func (x *ExecutionSpec) GetEmployerMachineId() string {
+	if x != nil {
+		return x.EmployerMachineId
 	}
 	return ""
 }
@@ -1785,14 +1795,15 @@ func (*AckResponse) Descriptor() ([]byte, []int) {
 }
 
 type HeartbeatMsg struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	WorkerId        string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
-	ActiveAttemptId string                 `protobuf:"bytes,2,opt,name=active_attempt_id,json=activeAttemptId,proto3" json:"active_attempt_id,omitempty"`
-	Sequence        int64                  `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	Time            *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=time,proto3" json:"time,omitempty"`
-	CompletedTask   *ExecutionResult       `protobuf:"bytes,5,opt,name=completed_task,json=completedTask,proto3" json:"completed_task,omitempty"` // non-nil when a task just completed
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	WorkerId          string                 `protobuf:"bytes,1,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	ActiveAttemptId   string                 `protobuf:"bytes,2,opt,name=active_attempt_id,json=activeAttemptId,proto3" json:"active_attempt_id,omitempty"`
+	Sequence          int64                  `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Time              *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=time,proto3" json:"time,omitempty"`
+	CompletedTask     *ExecutionResult       `protobuf:"bytes,5,opt,name=completed_task,json=completedTask,proto3" json:"completed_task,omitempty"`               // non-nil when a task just completed
+	EmployerMachineId string                 `protobuf:"bytes,6,opt,name=employer_machine_id,json=employerMachineId,proto3" json:"employer_machine_id,omitempty"` // set by employer on handshake/ack
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *HeartbeatMsg) Reset() {
@@ -1858,6 +1869,13 @@ func (x *HeartbeatMsg) GetCompletedTask() *ExecutionResult {
 		return x.CompletedTask
 	}
 	return nil
+}
+
+func (x *HeartbeatMsg) GetEmployerMachineId() string {
+	if x != nil {
+		return x.EmployerMachineId
+	}
+	return ""
 }
 
 type GlobalConfig struct {
@@ -3065,7 +3083,7 @@ const file_worker_proto_rawDesc = "" +
 	"\x04path\x18\x04 \x01(\tR\x04path\x12\x16\n" +
 	"\x06secure\x18\x05 \x01(\bR\x06secure\x12\x1b\n" +
 	"\thttp_only\x18\x06 \x01(\bR\bhttpOnly\x12\x18\n" +
-	"\aexpires\x18\a \x01(\x03R\aexpires\"\xe1\x05\n" +
+	"\aexpires\x18\a \x01(\x03R\aexpires\"\x91\x06\n" +
 	"\rExecutionSpec\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x1b\n" +
@@ -3089,7 +3107,8 @@ const file_worker_proto_rawDesc = "" +
 	"\rbws_ticket_no\x18\x15 \x01(\tR\vbwsTicketNo\x12,\n" +
 	"\x12bws_activity_title\x18\x16 \x01(\tR\x10bwsActivityTitle\x12(\n" +
 	"\x10bws_reserve_time\x18\x17 \x01(\x03R\x0ebwsReserveTime\x12(\n" +
-	"\x10bws_reserve_date\x18\x18 \x01(\tR\x0ebwsReserveDate\"\x99\x05\n" +
+	"\x10bws_reserve_date\x18\x18 \x01(\tR\x0ebwsReserveDate\x12.\n" +
+	"\x13employer_machine_id\x18\x19 \x01(\tR\x11employerMachineId\"\x99\x05\n" +
 	"\x0fExecutionResult\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\x12\x1b\n" +
@@ -3184,13 +3203,14 @@ const file_worker_proto_rawDesc = "" +
 	"AckRequest\x12\x1d\n" +
 	"\n" +
 	"attempt_id\x18\x01 \x01(\tR\tattemptId\"\r\n" +
-	"\vAckResponse\"\xe3\x01\n" +
+	"\vAckResponse\"\x93\x02\n" +
 	"\fHeartbeatMsg\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12*\n" +
 	"\x11active_attempt_id\x18\x02 \x01(\tR\x0factiveAttemptId\x12\x1a\n" +
 	"\bsequence\x18\x03 \x01(\x03R\bsequence\x12.\n" +
 	"\x04time\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x04time\x12>\n" +
-	"\x0ecompleted_task\x18\x05 \x01(\v2\x17.worker.ExecutionResultR\rcompletedTask\"`\n" +
+	"\x0ecompleted_task\x18\x05 \x01(\v2\x17.worker.ExecutionResultR\rcompletedTask\x12.\n" +
+	"\x13employer_machine_id\x18\x06 \x01(\tR\x11employerMachineId\"`\n" +
 	"\fGlobalConfig\x12*\n" +
 	"\x11retry_interval_ms\x18\x01 \x01(\x03R\x0fretryIntervalMs\x12$\n" +
 	"\x0estart_delay_ms\x18\x02 \x01(\x03R\fstartDelayMs\"@\n" +

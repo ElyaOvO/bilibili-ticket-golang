@@ -319,6 +319,9 @@ type ExecutionSpec struct {
 	ReflowStockCheck bool        `json:"reflowStockCheck"`
 	Credentials      Credentials `json:"credentials"`
 	TaskType         TaskType    `json:"taskType,omitempty"`
+	// EmployerMachineID is reporting metadata forwarded to the worker. It is
+	// excluded from Hash because it does not affect task execution.
+	EmployerMachineID string `json:"employerMachineId,omitempty"`
 
 	// BWS-specific fields
 	BWSActivityID    int    `json:"bwsActivityId,omitempty"`
@@ -362,6 +365,7 @@ func (s ExecutionSpec) Validate() error {
 func (s ExecutionSpec) Hash() string {
 	copy := s
 	copy.Credentials = Credentials{}
+	copy.EmployerMachineID = ""
 	// Zero out BWS fields so they don't affect hash when not a BWS task
 	copy.BWSActivityID = 0
 	copy.BWSTicketNo = ""

@@ -18,6 +18,13 @@ import (
 
 type employerBackend struct{}
 
+func TestSpecProtoPreservesEmployerMachineID(t *testing.T) {
+	protoSpec := specToProto(domain.ExecutionSpec{EmployerMachineID: "employer-machine"})
+	if protoSpec.EmployerMachineId != "employer-machine" {
+		t.Fatalf("employer_machine_id=%q", protoSpec.EmployerMachineId)
+	}
+}
+
 func TestExecutionResultFromProtoPreservesSubOrders(t *testing.T) {
 	r := executionResultFromProto(&pb.ExecutionResult{
 		AttemptId: "attempt", State: pb.AttemptState_ATTEMPT_PARTIAL, Partial: true,

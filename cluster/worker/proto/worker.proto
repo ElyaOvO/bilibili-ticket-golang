@@ -103,6 +103,10 @@ message ExecutionSpec {
   string bws_activity_title = 22;
   int64  bws_reserve_time   = 23;
   string bws_reserve_date   = 24;
+
+  // Reporting metadata. The worker includes this together with its own
+  // machine ID when it reports task logs.
+  string employer_machine_id = 25;
 }
 
 message ExecutionResult {
@@ -239,6 +243,7 @@ message HeartbeatMsg {
   int64                     sequence          = 3;
   google.protobuf.Timestamp time              = 4;
   ExecutionResult           completed_task    = 5;  // non-nil when a task just completed
+  string                    employer_machine_id = 6; // set by employer on handshake/ack
 }
 
 // =============================================================================

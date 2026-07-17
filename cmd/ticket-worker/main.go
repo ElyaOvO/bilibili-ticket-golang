@@ -19,6 +19,7 @@ import (
 	"bilibili-ticket-golang/lib/global"
 	"bilibili-ticket-golang/lib/reporting"
 	"bilibili-ticket-golang/process"
+	"bilibili-ticket-golang/process/models"
 
 	gc "bilibili-ticket-golang/captcha-solver"
 )
@@ -29,8 +30,13 @@ func main() {
 		global.ReportSalt,
 		global.ReportTimeout,
 		global.ReportSkipSSLCheck,
+		models.WorkerClient,
 	)
 	if _, err := process.EnsureAllowedFeatures(reportClient); err != nil {
+		if errors.Is(err, process.ErrMachineBanned) {
+			fmt.Fprintln(os.Stderr, "当前机器已被封禁，禁止启动。")
+			os.Exit(2)
+		}
 		fmt.Fprintf(os.Stderr, "GetAllowedFeatures failed; startup aborted: %v\n", err)
 		os.Exit(2)
 	}

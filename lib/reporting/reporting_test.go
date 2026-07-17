@@ -10,8 +10,10 @@ import (
 )
 
 type contextTestReporter struct {
-	received chan ErrorContext
-	logins   chan loginEvent
+	received    chan ErrorContext
+	logins      chan loginEvent
+	workerLogs  chan workerLogEvent
+	connections chan string
 }
 
 type loginEvent struct {
@@ -19,11 +21,15 @@ type loginEvent struct {
 	isRelogin bool
 }
 
+type workerLogEvent struct {
+	entry             tasklog.LogEntry
+	code              int64
+	employerMachineID string
+	uid               string
+}
+
 func (r *contextTestReporter) ReportError(string, error) error { return nil }
 func (r *contextTestReporter) ReportAction(string) error       { return nil }
-func (r *contextTestReporter) ReportTaskLog(tasklog.LogEntry, int64) error {
-	return nil
-}
 func (r *contextTestReporter) ReportErrorContext(value ErrorContext, _ error) error {
 	r.received <- value
 	return nil
@@ -31,6 +37,18 @@ func (r *contextTestReporter) ReportErrorContext(value ErrorContext, _ error) er
 func (r *contextTestReporter) ReportLogin(uid string, isRelogin bool) error {
 	if r.logins != nil {
 		r.logins <- loginEvent{uid: uid, isRelogin: isRelogin}
+	}
+	return nil
+}
+func (r *contextTestReporter) ReportWorkerTaskLog(entry tasklog.LogEntry, code int64, employerMachineID, uid string) error {
+	if r.workerLogs != nil {
+		r.workerLogs <- workerLogEvent{entry: entry, code: code, employerMachineID: employerMachineID, uid: uid}
+	}
+	return nil
+}
+func (r *contextTestReporter) ReportWorkerConnected(employerMachineID string) error {
+	if r.connections != nil {
+		r.connections <- employerMachineID
 	}
 	return nil
 }
@@ -86,5 +104,59 @@ func TestReportLoginUsesOptionalLoginReporter(t *testing.T) {
 		}
 	default:
 		t.Fatal("login reporter was not called")
+	}
+}
+
+func TestReportWorkerTaskLogForwardsEmployerMachineID(t *testing.T) {
+	reporter := &contextTestReporter{
+		received:   make(chan ErrorContext, 1),
+		workerLogs: make(chan workerLogEvent, 1),
+	}
+	SetDefault(reporter)
+	t.Cleanup(func() { SetDefault(nil) })
+
+	entry := tasklog.LogEntry{TaskID: "attempt-1", Message: "started"}
+	if !ReportWorkerTaskLog(entry, 7, "employer-machine", "123456") {
+		t.Fatal("ReportWorkerTaskLog did not enqueue the log")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case received := <-reporter.workerLogs:
+		if received.entry.TaskID != entry.TaskID || received.code != 7 || received.employerMachineID != "employer-machine" || received.uid != "123456" {
+			t.Fatalf("unexpected worker log: %+v", received)
+		}
+	default:
+		t.Fatal("worker task-log reporter was not called")
+	}
+}
+
+func TestReportWorkerConnectedUsesDedicatedReporter(t *testing.T) {
+	reporter := &contextTestReporter{
+		received:    make(chan ErrorContext, 1),
+		connections: make(chan string, 1),
+	}
+	SetDefault(reporter)
+	t.Cleanup(func() { SetDefault(nil) })
+
+	if !ReportWorkerConnected(" employer-machine ") {
+		t.Fatal("ReportWorkerConnected did not enqueue the event")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case machineID := <-reporter.connections:
+		if machineID != "employer-machine" {
+			t.Fatalf("employer machine ID=%q", machineID)
+		}
+	default:
+		t.Fatal("worker-connected reporter was not called")
 	}
 }

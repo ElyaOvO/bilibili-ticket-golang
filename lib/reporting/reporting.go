@@ -15,7 +15,6 @@ const defaultQueueCapacity = 256
 type Reporter interface {
 	ReportError(code string, err error) error
 	ReportAction(action string) error
-	ReportTaskLog(entry tasklog.LogEntry, code int64) error
 }
 
 // ErrorContext carries stable business context for error aggregation. Operation
@@ -39,6 +38,19 @@ type LoginReporter interface {
 	ReportLogin(uid string, isRelogin bool) error
 }
 
+// WorkerTaskLogReporter is an optional extension for logs emitted on a worker.
+// employerMachineID identifies the host that submitted the task; the concrete
+// reporter supplies the current worker's machine ID.
+type WorkerTaskLogReporter interface {
+	ReportWorkerTaskLog(tasklog.LogEntry, int64, string, string) error
+}
+
+// WorkerConnectedReporter reports the first connection from an employer
+// machine observed by this worker process.
+type WorkerConnectedReporter interface {
+	ReportWorkerConnected(string) error
+}
+
 type eventKind uint8
 
 const (
@@ -47,19 +59,22 @@ const (
 	eventBarrier
 	eventTaskLog
 	eventLogin
+	eventWorkerConnected
 )
 
 type event struct {
-	kind    eventKind
-	code    string
-	op      string
-	err     error
-	action  string
-	entry   tasklog.LogEntry
-	value   int64
-	uid     string
-	relogin bool
-	done    chan struct{}
+	kind              eventKind
+	code              string
+	op                string
+	err               error
+	action            string
+	entry             tasklog.LogEntry
+	value             int64
+	uid               string
+	relogin           bool
+	employerMachineID string
+	executionUID      string
+	done              chan struct{}
 }
 
 type dispatcher struct {
@@ -119,12 +134,33 @@ func ReportAction(action string) bool {
 	return defaultDispatcher.enqueue(event{kind: eventAction, action: action})
 }
 
-// ReportTaskLog queues a structured task log without blocking the caller.
-func ReportTaskLog(entry tasklog.LogEntry, code int64) bool {
+// ReportWorkerTaskLog queues a task log emitted by a worker together with the
+// machine ID of the employer that submitted the task.
+func ReportWorkerTaskLog(entry tasklog.LogEntry, code int64, employerMachineID, uid string) bool {
 	if !defaultDispatcher.enabled() {
 		return false
 	}
-	return defaultDispatcher.enqueue(event{kind: eventTaskLog, entry: entry, value: code})
+	return defaultDispatcher.enqueue(event{
+		kind:              eventTaskLog,
+		entry:             entry,
+		value:             code,
+		employerMachineID: employerMachineID,
+		executionUID:      uid,
+	})
+}
+
+// ReportWorkerConnected queues the first connection observed from an employer
+// machine. Deduplication is owned by the worker server, where connection state
+// is available.
+func ReportWorkerConnected(employerMachineID string) bool {
+	employerMachineID = strings.TrimSpace(employerMachineID)
+	if employerMachineID == "" || !defaultDispatcher.enabled() {
+		return false
+	}
+	return defaultDispatcher.enqueue(event{
+		kind:              eventWorkerConnected,
+		employerMachineID: employerMachineID,
+	})
 }
 
 // ReportLogin queues a verified account-login event. UID is deliberately
@@ -196,10 +232,16 @@ func (d *dispatcher) run() {
 		case eventAction:
 			err = reporter.ReportAction(e.action)
 		case eventTaskLog:
-			err = reporter.ReportTaskLog(e.entry, e.value)
+			if workerReporter, ok := reporter.(WorkerTaskLogReporter); ok {
+				err = workerReporter.ReportWorkerTaskLog(e.entry, e.value, e.employerMachineID, e.executionUID)
+			}
 		case eventLogin:
 			if loginReporter, ok := reporter.(LoginReporter); ok {
 				err = loginReporter.ReportLogin(e.uid, e.relogin)
+			}
+		case eventWorkerConnected:
+			if connectedReporter, ok := reporter.(WorkerConnectedReporter); ok {
+				err = connectedReporter.ReportWorkerConnected(e.employerMachineID)
 			}
 		}
 		if err != nil {

@@ -20,6 +20,7 @@ import (
 	biliclock "bilibili-ticket-golang/lib/biliutils/clock"
 	"bilibili-ticket-golang/lib/models/bili/api"
 	"bilibili-ticket-golang/lib/reporting"
+	"bilibili-ticket-golang/lib/tasklog"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -117,15 +118,17 @@ type BackendFactory func(domain.ExecutionSpec) (executor.Backend, error)
 type CaptchaTester func() (elapsed string, validate string, captchaType string, err error)
 
 type task struct {
-	spec          domain.ExecutionSpec
-	specHash      string
-	state         domain.AttemptState
-	result        domain.ExecutionResult
-	leaseUntil    time.Time
-	cooldownUntil time.Time // zero when not cooling
-	cancel        context.CancelFunc
-	logs          []LogEntry
-	logSeq        int64
+	spec              domain.ExecutionSpec
+	employerMachineID string
+	executionUID      string
+	specHash          string
+	state             domain.AttemptState
+	result            domain.ExecutionResult
+	leaseUntil        time.Time
+	cooldownUntil     time.Time // zero when not cooling
+	cancel            context.CancelFunc
+	logs              []LogEntry
+	logSeq            int64
 }
 
 type LogEntry struct {
@@ -150,6 +153,7 @@ type Server struct {
 	grpcServer         *grpc.Server  // set by ServeOn/ListenAndServe; nil until serving
 	captchaTester      CaptchaTester // optional; enables TestCaptcha RPC
 	stopped            bool
+	connectedEmployers map[string]struct{}
 
 	// Global configuration pushed by the employer via Configure RPC.
 	globalConfig   GlobalConfig
@@ -190,7 +194,15 @@ func NewServer(config Config, factory BackendFactory) (*Server, error) {
 		}
 	}
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
-	s := &Server{config: config, factory: factory, store: store, tasks: make(map[string]*task), now: time.Now, lifecycleCancel: lifecycleCancel}
+	s := &Server{
+		config:             config,
+		factory:            factory,
+		store:              store,
+		tasks:              make(map[string]*task),
+		connectedEmployers: make(map[string]struct{}),
+		now:                time.Now,
+		lifecycleCancel:    lifecycleCancel,
+	}
 	for _, result := range store.Unacked() {
 		id := result.AttemptID
 		if !result.State.Terminal() {
@@ -409,7 +421,15 @@ func (ws *workerService) Submit(_ context.Context, req *pb.SubmitRequest) (*pb.S
 		return nil, status.Error(codes.ResourceExhausted, "worker is busy")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &task{spec: spec, specHash: hash, state: domain.AttemptWaiting, leaseUntil: s.now().Add(s.config.LeaseDuration), cancel: cancel}
+	t := &task{
+		spec:              spec,
+		employerMachineID: spec.EmployerMachineID,
+		executionUID:      executionUID(spec.Credentials),
+		specHash:          hash,
+		state:             domain.AttemptWaiting,
+		leaseUntil:        s.now().Add(s.config.LeaseDuration),
+		cancel:            cancel,
+	}
 	s.tasks[spec.AttemptID], s.active = t, spec.AttemptID
 	resp := &pb.SubmitResponse{Status: statusToProto(s.snapshot(t))}
 	s.lifecycleWG.Add(1)
@@ -1064,17 +1084,40 @@ func (ws *workerService) Heartbeat(stream pb.WorkerService_HeartbeatServer) erro
 	go func() {
 		defer cancel()
 		for {
-			_, err := stream.Recv()
+			msg, err := stream.Recv()
 			if err != nil {
 				errCh <- err
 				return
 			}
+			s.reportWorkerConnected(msg.EmployerMachineId)
 		}
 	}()
 
 	// Block until either side closes.
 	err := <-errCh
 	return err
+}
+
+func (s *Server) reportWorkerConnected(employerMachineID string) {
+	employerMachineID = strings.TrimSpace(employerMachineID)
+	if employerMachineID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.connectedEmployers == nil {
+		s.connectedEmployers = make(map[string]struct{})
+	}
+	if _, exists := s.connectedEmployers[employerMachineID]; exists {
+		s.mu.Unlock()
+		return
+	}
+	s.connectedEmployers[employerMachineID] = struct{}{}
+	s.mu.Unlock()
+	if !reporting.ReportWorkerConnected(employerMachineID) {
+		s.mu.Lock()
+		delete(s.connectedEmployers, employerMachineID)
+		s.mu.Unlock()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,16 +1129,17 @@ func specFromProto(p *pb.ExecutionSpec) (domain.ExecutionSpec, error) {
 		return domain.ExecutionSpec{}, errors.New("nil ExecutionSpec")
 	}
 	s := domain.ExecutionSpec{
-		AttemptID:    p.AttemptId,
-		IntentID:     p.IntentId,
-		ProjectID:    p.ProjectId,
-		ScreenID:     p.ScreenId,
-		SKUID:        p.SkuId,
-		StartMode:    startModeFromProto(p.StartMode),
-		IntervalMS:   p.IntervalMs,
-		StartDelayMS: p.StartDelayMs,
-		Credentials:  credentialsFromProto(p.Credentials),
-		TaskType:     taskTypeFromProto(p.TaskType),
+		AttemptID:         p.AttemptId,
+		IntentID:          p.IntentId,
+		ProjectID:         p.ProjectId,
+		ScreenID:          p.ScreenId,
+		SKUID:             p.SkuId,
+		StartMode:         startModeFromProto(p.StartMode),
+		IntervalMS:        p.IntervalMs,
+		StartDelayMS:      p.StartDelayMs,
+		Credentials:       credentialsFromProto(p.Credentials),
+		TaskType:          taskTypeFromProto(p.TaskType),
+		EmployerMachineID: p.EmployerMachineId,
 		// BWS fields
 		BWSActivityID:    int(p.BwsActivityId),
 		BWSTicketNo:      p.BwsTicketNo,
@@ -1583,6 +1627,40 @@ func (s *Server) logTask(t *task, stage, message string, code int, retryable boo
 	}
 	s.mu.Unlock()
 	_ = WriteRedactedLog(s.config.DataDir, fmt.Sprintf("%s attempt=%s stage=%s code=%d retryable=%t message=%s", entry.Time.Format(time.RFC3339Nano), t.spec.AttemptID, stage, code, retryable, message))
+	level := tasklog.LogInfo
+	if code != 0 {
+		level = tasklog.LogError
+		if retryable {
+			level = tasklog.LogWarn
+		}
+	}
+	reporting.ReportWorkerTaskLog(tasklog.LogEntry{
+		TaskID:    t.spec.AttemptID,
+		Level:     level,
+		Message:   fmt.Sprintf("[%s] %s", stage, message),
+		Timestamp: entry.Time,
+	}, int64(code), t.employerMachineID, t.executionUID)
+}
+
+func executionUID(credentials domain.Credentials) string {
+	uid := strings.TrimSpace(credentials.Cookies["DedeUserID"])
+	if uid == "" {
+		for _, cookie := range credentials.CookieJar {
+			if cookie.Name == "DedeUserID" {
+				uid = strings.TrimSpace(cookie.Value)
+				break
+			}
+		}
+	}
+	if uid == "" || uid == "0" || len(uid) > 20 {
+		return ""
+	}
+	for _, r := range uid {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return uid
 }
 
 func (s *Server) reapLeases(ctx context.Context) {

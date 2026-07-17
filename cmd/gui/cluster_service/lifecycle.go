@@ -123,6 +123,12 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 	return service
 }
 
+// SetEmployerMachineID configures the identity forwarded to workers for
+// worker-side task-log reporting.
+func (s *ClusterService) SetEmployerMachineID(machineID string) {
+	s.client.SetEmployerMachineID(machineID)
+}
+
 // SetNotifier sets the notification callback invoked on ticket success.
 func (s *ClusterService) SetNotifier(notify func(string)) { s.notify = notify }
 

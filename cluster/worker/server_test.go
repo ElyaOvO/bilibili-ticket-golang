@@ -14,6 +14,7 @@ import (
 	"bilibili-ticket-golang/cluster/domain"
 	"bilibili-ticket-golang/cluster/executor"
 	pb "bilibili-ticket-golang/cluster/worker/proto"
+	"bilibili-ticket-golang/lib/reporting"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -25,6 +26,17 @@ import (
 type backend struct {
 	block   <-chan struct{}
 	outcome executor.Outcome
+}
+
+type connectedReporter struct {
+	connections chan string
+}
+
+func (r *connectedReporter) ReportError(string, error) error { return nil }
+func (r *connectedReporter) ReportAction(string) error       { return nil }
+func (r *connectedReporter) ReportWorkerConnected(employerMachineID string) error {
+	r.connections <- employerMachineID
+	return nil
 }
 
 func (b backend) Attempt(ctx context.Context, _ domain.ExecutionSpec) executor.Outcome {
@@ -41,6 +53,50 @@ func (backend) Credentials() domain.Credentials { return domain.Credentials{Vers
 
 func workerSpec(id string) domain.ExecutionSpec {
 	return domain.ExecutionSpec{AttemptID: id, IntentID: "i", ProjectID: 1, ScreenID: 2, SKUID: 3, Buyers: []domain.Buyer{{LogicalID: "b"}}, StartMode: domain.StartImmediate, Deadline: time.Now().Add(time.Minute)}
+}
+
+func TestExecutionUIDFromCredentials(t *testing.T) {
+	tests := []struct {
+		name        string
+		credentials domain.Credentials
+		want        string
+	}{
+		{name: "cookie map", credentials: domain.Credentials{Cookies: map[string]string{"DedeUserID": "123456"}}, want: "123456"},
+		{name: "cookie jar", credentials: domain.Credentials{CookieJar: []domain.HTTPCookie{{Name: "DedeUserID", Value: "654321"}}}, want: "654321"},
+		{name: "invalid", credentials: domain.Credentials{Cookies: map[string]string{"DedeUserID": "uid=123"}}},
+		{name: "zero", credentials: domain.Credentials{Cookies: map[string]string{"DedeUserID": "0"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := executionUID(test.credentials); got != test.want {
+				t.Fatalf("executionUID()=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWorkerConnectedEventDeduplicatesEmployerMachineID(t *testing.T) {
+	reporter := &connectedReporter{connections: make(chan string, 3)}
+	reporting.SetDefault(reporter)
+	t.Cleanup(func() { reporting.SetDefault(nil) })
+	server := &Server{connectedEmployers: make(map[string]struct{})}
+
+	server.reportWorkerConnected("employer-a")
+	server.reportWorkerConnected("employer-a")
+	server.reportWorkerConnected("employer-b")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := reporting.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]int{}
+	for len(reporter.connections) > 0 {
+		seen[<-reporter.connections]++
+	}
+	if seen["employer-a"] != 1 || seen["employer-b"] != 1 || len(seen) != 2 {
+		t.Fatalf("unexpected connected events: %#v", seen)
+	}
 }
 
 // startTestServer creates a real gRPC worker server with auto-generated mTLS

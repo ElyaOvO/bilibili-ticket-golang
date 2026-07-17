@@ -38,11 +38,12 @@ type workerConn struct {
 
 // WorkerClient manages gRPC connections to workers.
 type WorkerClient struct {
-	mu              sync.Mutex
-	workers         map[string]*workerConn
-	tlsConfigs      map[string]*tls.Config
-	disconnected    map[string]bool // true = user manually disconnected, skip auto-reconnect
-	onCompletedTask func(workerID string, result domain.ExecutionResult)
+	mu                sync.Mutex
+	workers           map[string]*workerConn
+	tlsConfigs        map[string]*tls.Config
+	disconnected      map[string]bool // true = user manually disconnected, skip auto-reconnect
+	employerMachineID string
+	onCompletedTask   func(workerID string, result domain.ExecutionResult)
 }
 
 func NewWorkerClient() *WorkerClient {
@@ -51,6 +52,14 @@ func NewWorkerClient() *WorkerClient {
 		tlsConfigs:   make(map[string]*tls.Config),
 		disconnected: make(map[string]bool),
 	}
+}
+
+// SetEmployerMachineID configures the machine ID forwarded with every task so
+// the worker can correlate its task-log reports with the employer host.
+func (c *WorkerClient) SetEmployerMachineID(machineID string) {
+	c.mu.Lock()
+	c.employerMachineID = machineID
+	c.mu.Unlock()
 }
 
 // SetOnCompletedTask registers a callback invoked when a worker pushes a
@@ -188,6 +197,7 @@ func (c *WorkerClient) ensureHeartbeat(node domain.WorkerNode, wc *workerConn) {
 func (c *WorkerClient) startHeartbeat(node domain.WorkerNode, wc *workerConn) {
 	ctx, cancel := context.WithCancel(context.Background())
 	wc.hbCancel = cancel
+	employerMachineID := c.employerMachineID
 
 	stream, err := wc.client.Heartbeat(ctx)
 	if err != nil {
@@ -240,15 +250,21 @@ func (c *WorkerClient) startHeartbeat(node domain.WorkerNode, wc *workerConn) {
 
 			// Echo back as acknowledgement.
 			_ = stream.Send(&pb.HeartbeatMsg{
-				WorkerId: msg.WorkerId,
-				Sequence: msg.Sequence,
-				Time:     timestamppb.Now(),
+				WorkerId:          msg.WorkerId,
+				Sequence:          msg.Sequence,
+				Time:              timestamppb.Now(),
+				EmployerMachineId: employerMachineID,
 			})
 		}
 	}()
 
 	// Send initial heartbeat to kick-start the stream.
-	_ = stream.Send(&pb.HeartbeatMsg{WorkerId: node.ID, Sequence: 0, Time: timestamppb.Now()})
+	_ = stream.Send(&pb.HeartbeatMsg{
+		WorkerId:          node.ID,
+		Sequence:          0,
+		Time:              timestamppb.Now(),
+		EmployerMachineId: employerMachineID,
+	})
 }
 
 // isAlive returns whether the worker is currently sending heartbeats.
@@ -314,6 +330,9 @@ func (c *WorkerClient) Submit(ctx context.Context, node domain.WorkerNode, spec 
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	spec.EmployerMachineID = c.employerMachineID
+	c.mu.Unlock()
 	req := &pb.SubmitRequest{Spec: specToProto(spec)}
 	_, err = cli.Submit(ctx, req)
 	return err
@@ -659,15 +678,16 @@ func (c *WorkerClient) health(ctx context.Context, node domain.WorkerNode, emplo
 
 func specToProto(s domain.ExecutionSpec) *pb.ExecutionSpec {
 	p := &pb.ExecutionSpec{
-		AttemptId:    s.AttemptID,
-		IntentId:     s.IntentID,
-		ProjectId:    s.ProjectID,
-		ScreenId:     s.ScreenID,
-		SkuId:        s.SKUID,
-		StartMode:    startModeToProto(s.StartMode),
-		IntervalMs:   s.IntervalMS,
-		StartDelayMs: s.StartDelayMS,
-		TaskType:     taskTypeToProto(s.TaskType),
+		AttemptId:         s.AttemptID,
+		IntentId:          s.IntentID,
+		ProjectId:         s.ProjectID,
+		ScreenId:          s.ScreenID,
+		SkuId:             s.SKUID,
+		StartMode:         startModeToProto(s.StartMode),
+		IntervalMs:        s.IntervalMS,
+		StartDelayMs:      s.StartDelayMS,
+		TaskType:          taskTypeToProto(s.TaskType),
+		EmployerMachineId: s.EmployerMachineID,
 		Credentials: &pb.Credentials{
 			Cookies:       s.Credentials.Cookies,
 			RefreshToken:  s.Credentials.RefreshToken,

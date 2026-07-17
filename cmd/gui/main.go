@@ -16,10 +16,12 @@ import (
 	"bilibili-ticket-golang/lib/tasklog"
 	"bilibili-ticket-golang/lib/terminal"
 	"bilibili-ticket-golang/process"
+	"bilibili-ticket-golang/process/models"
 	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -37,7 +39,7 @@ import (
 var assets embed.FS
 
 const privacyTOSPrompt = `
-{{#ffffff|#303f9f|bold}}================ 隐私与遥测说明（ToS v1） ================{{/}}
+{{#ffffff|#303f9f|bold}}================ 隐私与遥测说明（ToS v1.1） ================{{/}}
 
 本程序启用云控与远程诊断。只有在你确认本条款后，远程上报才会初始化。
 
@@ -50,7 +52,7 @@ const privacyTOSPrompt = `
 {{bold}}4. 登录事件：{{/}}登录成功后的 Bilibili UID，以及是否为已存在账号的重新登录。
 {{bold}}5. 错误诊断：{{/}}错误码、业务操作、分类、上游状态码、重试属性、指纹，以及经过脱敏和
    长度限制的错误消息/原因链；不上传源码文件路径和行号。
-{{bold}}6. 任务日志：{{/}}任务 ID、日志级别、时间和日志消息。日志消息可能包含项目/活动信息、
+{{bold}}6. 任务日志：{{/}}任务 ID、执行账号 UID、Employer/Worker 机器码、日志级别、时间和日志消息。日志消息可能包含项目/活动信息、
    票号、接口状态和上游返回文本，因此{{#ffffff|#d32f2f|bold}}任务日志不应被视为匿名数据{{/}}。
 
 {{#90caf9|bold}}【不会作为遥测字段主动上报的内容】{{/}}
@@ -86,7 +88,7 @@ func main() {
 	terminalAttached := terminal.Attached()
 
 	_, err := terminal.ConfirmOnce(terminal.ConfirmationOptions{
-		MarkerPath:     "data/.privacy-tos-v1.accepted",
+		MarkerPath:     "data/.privacy-tos-v1.1.accepted",
 		RequiredText:   "我已阅读并同意",
 		Prompt:         privacyTOSPrompt,
 		RetryMessage:   "{{#212121|#f57c00|bold}}未确认隐私与遥测条款。若不同意，请关闭终端退出；若同意，请输入「我已阅读并同意」：{{/}}",
@@ -186,8 +188,14 @@ func main() {
 		global.ReportSalt,
 		global.ReportTimeout,
 		global.ReportSkipSSLCheck,
+		models.EmployerClient,
 	)
-	if _, featureErr := process.EnsureAllowedFeatures(reportClient); featureErr != nil {
+	allowedFeatures, featureErr := process.EnsureAllowedFeatures(reportClient)
+	if featureErr != nil {
+		if errors.Is(featureErr, process.ErrMachineBanned) {
+			fmt.Fprintln(consoleErr, "\n[main] 当前机器已被封禁，禁止启动。")
+			return
+		}
 		log.Printf("[main] GetAllowedFeatures failed; startup aborted: %v", featureErr)
 		return
 	}
@@ -217,6 +225,7 @@ func main() {
 		log.Fatalf("[main] %v", fault)
 	}
 	clusterSvc := cluster_service.NewClusterService(clusterRepository)
+	clusterSvc.SetEmployerMachineID(allowedFeatures.Info.ID)
 
 	// Restore saved locale or leave empty for first-startup detection
 	if store.Locale != "" {
@@ -261,9 +270,6 @@ func main() {
 	}
 
 	logBroker := tasklog.NewLogBroker(logStorage)
-	logBroker.AddSink(func(entry tasklog.LogEntry) {
-		reporting.ReportTaskLog(entry, 0)
-	})
 	logService := NewTaskLogService(logBroker)
 
 	// Build MultiNotifier from persisted notification channels
