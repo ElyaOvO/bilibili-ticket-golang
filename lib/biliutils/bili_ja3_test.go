@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bertold/req/v3"
+	"github.com/imroc/req/v3"
 )
 
 // TLSBrowserLeaksResp mirrors the JSON returned by https://tls.browserleaks.com/json

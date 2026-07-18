@@ -3,13 +3,29 @@
 package cloudbootstrap
 
 import (
-	"fmt"
-
 	"bilibili-ticket-golang/lib/cloudcontrol"
 )
 
-// New keeps the public source tree buildable without containing the private
-// implementation. Release builds must select provider_private.go explicitly.
+// developmentController keeps local development independent of the private
+// cloud-control service. Production builds must select provider_private.go.
+type developmentController struct{}
+
 func New(cloudcontrol.Config) (cloudcontrol.Controller, error) {
-	return nil, fmt.Errorf("private cloud-control implementation is not linked; rebuild with -tags cloudcontrol")
+	return developmentController{}, nil
+}
+
+func (developmentController) Bootstrap(string) (cloudcontrol.Snapshot, error) {
+	return cloudcontrol.Snapshot{}, nil
+}
+
+func (developmentController) CheckFeature(string, string) error {
+	return nil
+}
+
+func (developmentController) ReportError(string, error) error {
+	return nil
+}
+
+func (developmentController) ReportAction(string) error {
+	return nil
 }
