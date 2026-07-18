@@ -154,6 +154,7 @@ type Server struct {
 	captchaTester      CaptchaTester // optional; enables TestCaptcha RPC
 	stopped            bool
 	connectedEmployers map[string]struct{}
+	featureAuthorizer  FeatureAuthorizer
 
 	// Global configuration pushed by the employer via Configure RPC.
 	globalConfig   GlobalConfig
@@ -168,6 +169,10 @@ type Server struct {
 	lifecycleCancel context.CancelFunc
 	lifecycleWG     sync.WaitGroup
 }
+
+// FeatureAuthorizer checks whether a task feature may start at a named
+// checkpoint. It must not mutate worker task state.
+type FeatureAuthorizer func(feature, checkpoint string) error
 
 const (
 	maxRetainedTerminalTasks = 1000
@@ -241,6 +246,11 @@ func NewGRPCService(s *Server) pb.WorkerServiceServer {
 // UNIMPLEMENTED.
 func (s *Server) SetCaptchaTester(t CaptchaTester) {
 	s.captchaTester = t
+}
+
+// SetFeatureAuthorizer installs the cloud-control check used by Submit.
+func (s *Server) SetFeatureAuthorizer(authorizer FeatureAuthorizer) {
+	s.featureAuthorizer = authorizer
 }
 
 // Stop immediately terminates the gRPC server and all active connections.
@@ -382,6 +392,20 @@ func (ws *workerService) Submit(_ context.Context, req *pb.SubmitRequest) (*pb.S
 	}
 	if err := spec.Validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if s.featureAuthorizer != nil {
+		feature := "TICKET"
+		if spec.TaskType == domain.TaskTypeBWS {
+			feature = "BWS"
+		}
+		if err := s.featureAuthorizer(feature, "worker_submit"); err != nil {
+			grpcCode := codes.PermissionDenied
+			var temporary interface{ Temporary() bool }
+			if errors.As(err, &temporary) && temporary.Temporary() {
+				grpcCode = codes.Unavailable
+			}
+			return nil, status.Error(grpcCode, err.Error())
+		}
 	}
 	hash := spec.Hash()
 

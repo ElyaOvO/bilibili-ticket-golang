@@ -9,14 +9,14 @@ import (
 	"bilibili-ticket-golang/cmd/gui/store/configuration"
 	"bilibili-ticket-golang/cmd/gui/store/cookiejar"
 	"bilibili-ticket-golang/lib/biliutils"
+	"bilibili-ticket-golang/lib/cloudbootstrap"
+	"bilibili-ticket-golang/lib/cloudcontrol"
 	"bilibili-ticket-golang/lib/global"
 	"bilibili-ticket-golang/lib/logfile"
 	"bilibili-ticket-golang/lib/notify"
 	"bilibili-ticket-golang/lib/reporting"
 	"bilibili-ticket-golang/lib/tasklog"
 	"bilibili-ticket-golang/lib/terminal"
-	"bilibili-ticket-golang/process"
-	"bilibili-ticket-golang/process/models"
 	"bytes"
 	"context"
 	"embed"
@@ -183,23 +183,25 @@ func main() {
 
 	// Remote reporting starts only after both terminal confirmations. Nothing
 	// above this point is sent to the reporting server.
-	reportClient := process.NewConfiguredReportClient(
-		global.ReportDSN,
-		global.ReportSalt,
-		global.ReportTimeout,
-		global.ReportSkipSSLCheck,
-		models.EmployerClient,
-	)
-	allowedFeatures, featureErr := process.EnsureAllowedFeatures(reportClient)
-	if featureErr != nil {
-		if errors.Is(featureErr, process.ErrMachineBanned) {
-			fmt.Fprintln(consoleErr, "\n[main] 当前机器已被封禁，禁止启动。")
-			return
-		}
-		log.Printf("[main] GetAllowedFeatures failed; startup aborted: %v", featureErr)
+	cloudController, controllerErr := cloudbootstrap.New(cloudcontrol.Config{
+		DSN: global.ReportDSN, CapabilityPublicKey: global.ReportPublicKey,
+		Timeout: global.ReportTimeout, SkipSSLCheck: global.ReportSkipSSLCheck,
+		ClientType: cloudcontrol.EmployerClient,
+	})
+	if controllerErr != nil {
+		log.Printf("[main] initialize cloud-control: %v", controllerErr)
 		return
 	}
-	reporting.SetDefault(reportClient)
+	cloudSnapshot, featureErr := cloudController.Bootstrap("employer_startup")
+	if featureErr != nil {
+		if errors.Is(featureErr, cloudcontrol.ErrMachineBanned) {
+			fmt.Fprintln(consoleErr, "\n[main] The current machine is banned. Startup aborted.")
+			return
+		}
+		log.Printf("[main] cloud-control bootstrap failed; startup aborted: %v", featureErr)
+		return
+	}
+	reporting.SetDefault(cloudController)
 	reporting.ReportAction(reporting.ActionAppStart)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -225,7 +227,8 @@ func main() {
 		log.Fatalf("[main] %v", fault)
 	}
 	clusterSvc := cluster_service.NewClusterService(clusterRepository)
-	clusterSvc.SetEmployerMachineID(allowedFeatures.Info.ID)
+	clusterSvc.SetEmployerMachineID(cloudSnapshot.MachineID)
+	clusterSvc.SetFeatureChecker(cloudController)
 
 	// Restore saved locale or leave empty for first-startup detection
 	if store.Locale != "" {

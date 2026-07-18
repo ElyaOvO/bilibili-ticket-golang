@@ -3,7 +3,7 @@ package reporting
 // Stable top-level error codes submitted by business and process boundaries.
 // Keep their string values here so the cloud-control protocol has one registry.
 // Fine-grained codes derived from concrete errors (for example BILI_API_412 or
-// NETWORK_TIMEOUT) remain the responsibility of process/error_report.go.
+// NETWORK_TIMEOUT) remain the responsibility of the private reporting client.
 const (
 	// Executor boundaries.
 	CodeExecutorSpecInvalid    = "EXECUTOR_SPEC_INVALID"

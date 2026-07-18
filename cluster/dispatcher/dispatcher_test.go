@@ -147,6 +147,28 @@ func TestDispatcherSkipsBuyerDayAlreadyOccupiedBySuccess(t *testing.T) {
 	}
 }
 
+func TestSubmitAuthorizationFailureCreatesNoAttempt(t *testing.T) {
+	c := &client{}
+	r := &repo{}
+	d := New(c, r, nil)
+	accounts, workers := resources()
+	d.SetResources(accounts[:1], workers[:1])
+	intent := dispatchIntent("i-auth", "m-auth", 1, "buyer")
+	d.Add(IntentPlan{Macro: dispatchMacro("m-auth", 1), Intent: intent})
+	expected := fmt.Errorf("cloud-control unavailable")
+	d.SetSubmitAuthorizer(func(context.Context, domain.TaskType) error { return expected })
+
+	if err := d.Reconcile(context.Background()); err == nil {
+		t.Fatal("Reconcile succeeded despite authorization failure")
+	}
+	if len(c.submitted) != 0 || len(d.attempts) != 0 || len(r.attempts) != 0 {
+		t.Fatalf("authorization failure left side effects: submitted=%d attempts=%d persisted=%d", len(c.submitted), len(d.attempts), len(r.attempts))
+	}
+	if len(d.accountBusy) != 0 || len(d.workerBusy) != 0 {
+		t.Fatalf("authorization failure reserved resources: accounts=%#v workers=%#v", d.accountBusy, d.workerBusy)
+	}
+}
+
 func TestProcessCompletedTaskPreservesWinningAttemptMessage(t *testing.T) {
 	d := New(&client{}, &repo{}, nil)
 	d.attempts["a"] = &attempt{value: domain.ExecutionAttempt{

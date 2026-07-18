@@ -220,6 +220,37 @@ func TestAuthIdempotencyConflictAndSingleSlot(t *testing.T) {
 	}
 }
 
+type temporaryAuthorizationError struct{}
+
+func (temporaryAuthorizationError) Error() string   { return "cloud-control unavailable" }
+func (temporaryAuthorizationError) Temporary() bool { return true }
+
+func TestSubmitAuthorizationFailureCreatesNoTask(t *testing.T) {
+	config := Config{Listen: "127.0.0.1:0", DataDir: t.TempDir(), PollInterval: 10 * time.Second}
+	srv, err := NewServer(config, func(domain.ExecutionSpec) (executor.Backend, error) { return backend{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	srv.SetFeatureAuthorizer(func(feature, checkpoint string) error {
+		if feature != "TICKET" || checkpoint != "worker_submit" {
+			t.Fatalf("feature=%q checkpoint=%q", feature, checkpoint)
+		}
+		return fmt.Errorf("wrapped authorization: %w", temporaryAuthorizationError{})
+	})
+
+	service := NewGRPCService(srv)
+	_, err = service.Submit(context.Background(), &pb.SubmitRequest{Spec: mustSpecProto(t, workerSpec("denied"))})
+	if code := status.Code(err); code != codes.Unavailable {
+		t.Fatalf("code=%s err=%v, want Unavailable", code, err)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.tasks) != 0 || srv.active != "" {
+		t.Fatalf("authorization failure created task: tasks=%d active=%q", len(srv.tasks), srv.active)
+	}
+}
+
 func TestSuccessPersistsAndSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	listen := "127.0.0.1:0"

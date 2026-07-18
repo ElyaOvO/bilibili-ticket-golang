@@ -110,6 +110,9 @@ func (s *ClusterService) RefreshAccountsStatus(accountIDsJSON string) error {
 // SyncAccountBuyers synchronizes buyers from a single account into the
 // logical buyer pool, deduplicating by real-name identity.
 func (s *ClusterService) SyncAccountBuyers(accountID string) ([]domain.Buyer, error) {
+	if err := s.requireFeature(cloudFeatureTicket, "buyer_sync_account"); err != nil {
+		return nil, err
+	}
 	reportAction(reporting.ActionAccountBuyersSync)
 	buyers, err := s.accounts.SyncBuyers(context.Background(), accountID)
 	if err != nil {
@@ -126,6 +129,9 @@ func (s *ClusterService) SyncAccountBuyers(accountID string) ([]domain.Buyer, er
 // information. The same real person on multiple accounts is matched and
 // deduplicated into a single logical buyer entry.
 func (s *ClusterService) SyncAllAccountBuyers() ([]domain.Buyer, error) {
+	if err := s.requireFeature(cloudFeatureTicket, "buyer_sync_all"); err != nil {
+		return nil, err
+	}
 	reportAction(reporting.ActionAccountBuyersSyncAll)
 	buyers, err := s.accounts.SyncAllBuyers(context.Background())
 	if err != nil {
@@ -142,6 +148,9 @@ func (s *ClusterService) SyncAllAccountBuyers() ([]domain.Buyer, error) {
 // account, deduplicated, and GetBuyerSensitiveData is called exactly once
 // per unique logical buyer (with fallback accounts on failure).
 func (s *ClusterService) SyncAllAccountBuyersFast() ([]domain.Buyer, error) {
+	if err := s.requireFeature(cloudFeatureTicket, "buyer_sync_all_fast"); err != nil {
+		return nil, err
+	}
 	reportAction(reporting.ActionAccountBuyersSyncAllFast)
 	ctx := context.Background()
 	buyers, err := s.accounts.SyncAllBuyersFast(ctx)

@@ -253,6 +253,9 @@ func (s *ClusterService) StartMacro(macroID string) error {
 // compatibility path used by the frontend to start the reflow phase
 // immediately without adding a new Wails binding.
 func (s *ClusterService) StartTaskGroup(taskGroupID string, workerIDsJSON string) error {
+	if err := s.requireFeature(cloudFeatureTicket, "task_group_start"); err != nil {
+		return err
+	}
 	reportAction(reporting.ActionTaskGroupStart)
 	if workerIDsJSON == startTaskGroupReflowNowToken {
 		return s.startTaskGroupPhase(taskGroupID, domain.PhaseReflow, true, "")

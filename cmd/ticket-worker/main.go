@@ -16,31 +16,32 @@ import (
 	"bilibili-ticket-golang/cluster/executor"
 	"bilibili-ticket-golang/cluster/worker"
 	biliclock "bilibili-ticket-golang/lib/biliutils/clock"
+	"bilibili-ticket-golang/lib/cloudbootstrap"
+	"bilibili-ticket-golang/lib/cloudcontrol"
 	"bilibili-ticket-golang/lib/global"
 	"bilibili-ticket-golang/lib/reporting"
-	"bilibili-ticket-golang/process"
-	"bilibili-ticket-golang/process/models"
 
 	gc "bilibili-ticket-golang/captcha-solver"
 )
 
 func main() {
-	reportClient := process.NewConfiguredReportClient(
-		global.ReportDSN,
-		global.ReportSalt,
-		global.ReportTimeout,
-		global.ReportSkipSSLCheck,
-		models.WorkerClient,
-	)
-	if _, err := process.EnsureAllowedFeatures(reportClient); err != nil {
-		if errors.Is(err, process.ErrMachineBanned) {
-			fmt.Fprintln(os.Stderr, "当前机器已被封禁，禁止启动。")
+	cloudController, controllerErr := cloudbootstrap.New(cloudcontrol.Config{
+		DSN: global.ReportDSN, CapabilityPublicKey: global.ReportPublicKey,
+		Timeout: global.ReportTimeout, SkipSSLCheck: global.ReportSkipSSLCheck,
+		ClientType: cloudcontrol.WorkerClient,
+	})
+	if controllerErr != nil {
+		fatal("initialize cloud-control: %v", controllerErr)
+	}
+	if _, err := cloudController.Bootstrap("worker_startup"); err != nil {
+		if errors.Is(err, cloudcontrol.ErrMachineBanned) {
+			fmt.Fprintln(os.Stderr, "The current machine is banned. Startup aborted.")
 			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "GetAllowedFeatures failed; startup aborted: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cloud-control bootstrap failed; startup aborted: %v\n", err)
 		os.Exit(2)
 	}
-	reporting.SetDefault(reportClient)
+	reporting.SetDefault(cloudController)
 	if len(os.Args) < 2 {
 		fatal("usage: ticket-worker <run|serve|import|version>")
 	}
@@ -51,7 +52,7 @@ func main() {
 	case "run":
 		run(os.Args[2:])
 	case "serve":
-		serve(os.Args[2:])
+		serve(os.Args[2:], cloudController)
 	case "import":
 		importConfig(os.Args[2:])
 	default:
@@ -59,7 +60,7 @@ func main() {
 	}
 }
 
-func serve(args []string) {
+func serve(args []string, cloudController cloudcontrol.Controller) {
 	fmt.Printf("ticket-worker serve  commit=%s  built=%s\n", global.GitCommit, global.BuildTime)
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	path := fs.String("config", "", "worker config JSON")
@@ -93,6 +94,7 @@ func serve(args []string) {
 	if solver != nil {
 		server.SetCaptchaTester(makeCaptchaTester(solver))
 	}
+	server.SetFeatureAuthorizer(cloudController.CheckFeature)
 	if err := server.ListenAndServe(); err != nil {
 		fatal("serve worker: %v", err)
 	}

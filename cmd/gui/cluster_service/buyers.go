@@ -23,6 +23,9 @@ const maxRetainedBuyerSyncBatches = 50
 
 // ProvisionBuyer creates or updates a buyer on a specific account.
 func (s *ClusterService) ProvisionBuyer(document string, confirmed bool) error {
+	if err := s.requireFeature(cloudFeatureTicket, "buyer_provision"); err != nil {
+		return err
+	}
 	reportAction(reporting.ActionBuyerProvision)
 	var input struct {
 		AccountID string       `json:"accountId"`
@@ -39,6 +42,9 @@ func (s *ClusterService) ProvisionBuyer(document string, confirmed bool) error {
 // a JSON document containing buyerIds and, optionally, accountIds. Empty
 // accountIds means every enabled account.
 func (s *ClusterService) StartBuyerSync(document string) (BuyerSyncBatch, error) {
+	if err := s.requireFeature(cloudFeatureTicket, "buyer_sync_start"); err != nil {
+		return BuyerSyncBatch{}, err
+	}
 	reportAction(reporting.ActionBuyerSyncStart)
 	var req BuyerSyncStartRequest
 	if err := json.Unmarshal([]byte(document), &req); err != nil {

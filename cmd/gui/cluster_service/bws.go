@@ -218,6 +218,9 @@ func (s *ClusterService) BindBWSTicket(inputJSON string) (int, string, error) {
 // Accepts a JSON document with the fields defined in BWSSubmitInput.
 // Returns the attempt ID that can be used with Status/Logs/Stop.
 func (s *ClusterService) SubmitBWS(inputJSON string) (string, error) {
+	if err := s.requireFeature(cloudFeatureBWS, "bws_submit"); err != nil {
+		return "", err
+	}
 	reportAction(reporting.ActionBWSSubmit)
 	var input BWSSubmitInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {

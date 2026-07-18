@@ -202,6 +202,7 @@ type ClusterService struct {
 	bwsMeta              map[string]BWSSubmitInput // attemptID → BWS submit metadata
 	paymentWindowMu      sync.Mutex
 	openedPaymentWindows map[string]bool
+	featureChecker       FeatureChecker
 }
 
 type BuyerSyncState string

@@ -117,6 +117,10 @@ func (s *ClusterService) runTaskGroupWaves(ctx context.Context, taskGroup domain
 			if !waitUntil(ctx, waveStart) {
 				return
 			}
+			if err := s.requireFeature(cloudFeatureTicket, "task_group_wave"); err != nil {
+				log.Printf("[cluster] waves: task group %s wave %d cloud-control: %v", taskGroup.ID, wave, err)
+				return
+			}
 			if err := s.planTaskGroupWavePhase(ctx, taskGroup.ID, domain.PhaseReflow); err != nil {
 				log.Printf("[cluster] waves: task group %s wave %d plan reflow: %v", taskGroup.ID, wave, err)
 			}

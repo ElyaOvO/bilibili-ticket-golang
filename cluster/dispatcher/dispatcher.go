@@ -81,6 +81,15 @@ type Dispatcher struct {
 	workerRoles         map[string]domain.ResourceRole
 	retryIntervalMs     int64 // global retry interval (0 = use default 500ms)
 	startDelayMs        int64 // global start delay (0 = no early start)
+	authorizeSubmit     func(context.Context, domain.TaskType) error
+}
+
+// SetSubmitAuthorizer installs a side-effect-free authorization check that is
+// run immediately before a new attempt is constructed and submitted.
+func (d *Dispatcher) SetSubmitAuthorizer(authorizer func(context.Context, domain.TaskType) error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.authorizeSubmit = authorizer
 }
 
 func (d *Dispatcher) SetSuccessHandler(handler func(domain.LogicalOrderIntent, domain.ExecutionResult) error) {
@@ -1378,6 +1387,11 @@ func (d *Dispatcher) availableStandbySlots(plan *IntentPlan) int {
 }
 
 func (d *Dispatcher) dispatch(ctx context.Context, plan *IntentPlan, account domain.Account, worker domain.WorkerNode) error {
+	if d.authorizeSubmit != nil {
+		if err := d.authorizeSubmit(ctx, domain.TaskTypeTicket); err != nil {
+			return fmt.Errorf("authorize ticket dispatch: %w", err)
+		}
+	}
 	buyers := append([]domain.Buyer(nil), plan.Intent.Buyers...)
 	var err error
 	if d.resolver != nil {

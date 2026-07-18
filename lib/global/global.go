@@ -7,10 +7,12 @@ var (
 	Version     = "0.0.0"
 	LoggerLevel = "6"
 
-	// Reporting settings are injected at build time with -ldflags -X. All four
-	// values must be present and valid, otherwise the no-op reporter is used.
-	ReportDSN          = ""
-	ReportSalt         = ""
+	// Cloud-control settings are injected at build time with -ldflags -X.
+	// Production startup fails closed when any required value is invalid.
+	ReportDSN = ""
+	// ReportPublicKey is the Ed25519 public key used to verify capabilities
+	// signed by the cloud-control service. It is injected at release build time.
+	ReportPublicKey    = ""
 	ReportTimeout      = "5s"
 	ReportSkipSSLCheck = "false"
 

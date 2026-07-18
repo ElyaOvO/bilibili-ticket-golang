@@ -630,7 +630,14 @@ func (s *ClusterService) persistLoggedInAccount(client *biliutils.BiliClient, ja
 		log.Printf("[cluster] %s Gaia post-login report failed for persisted account %s: %v", source, accountID, reportErr)
 	}
 
-	_, _ = s.accounts.SyncBuyers(context.Background(), accountID)
+	if cloudErr := s.requireFeature(cloudFeatureTicket, "buyer_sync_after_login"); cloudErr != nil {
+		log.Printf("[cluster] %s post-login buyer sync blocked for account %s: %v", source, accountID, cloudErr)
+		if warning == "" {
+			warning = cloudErr.Error()
+		}
+	} else {
+		_, _ = s.accounts.SyncBuyers(context.Background(), accountID)
+	}
 	_ = s.refreshResources(context.Background())
 	return AccountLoginResult{AccountID: accountID, Name: account.Name, Warning: warning}, nil
 }

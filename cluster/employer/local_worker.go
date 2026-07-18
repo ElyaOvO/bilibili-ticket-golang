@@ -32,6 +32,7 @@ type LocalWorkerManager struct {
 	opts          LocalWorkerOptions
 	workerSolver  func(gt, challenge string) (string, error)
 	captchaTester worker.CaptchaTester
+	authorizer    worker.FeatureAuthorizer
 }
 
 type LocalWorkerOptions struct {
@@ -51,6 +52,12 @@ func (m *LocalWorkerManager) SetSolver(solver func(gt, challenge string) (string
 // manager. When set, local worker servers gain the TestCaptcha gRPC RPC.
 func (m *LocalWorkerManager) SetCaptchaTester(tester worker.CaptchaTester) {
 	m.captchaTester = tester
+}
+
+// SetFeatureAuthorizer installs the authorization check on all subsequently
+// started in-process workers.
+func (m *LocalWorkerManager) SetFeatureAuthorizer(authorizer worker.FeatureAuthorizer) {
+	m.authorizer = authorizer
 }
 
 // AddWorker creates and starts a new in-process worker. Use id="" for
@@ -250,6 +257,9 @@ func (m *LocalWorkerManager) startLocked(ctx context.Context, id, name, listen, 
 
 	if m.captchaTester != nil {
 		server.SetCaptchaTester(m.captchaTester)
+	}
+	if m.authorizer != nil {
+		server.SetFeatureAuthorizer(m.authorizer)
 	}
 
 	lis, err := net.Listen("tcp", listen)

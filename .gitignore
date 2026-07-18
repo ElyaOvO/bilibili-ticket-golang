@@ -13,3 +13,4 @@ plugins/models
 cmd/ticket-worker/ticket-worker.exe
 cmd/gui/ticket-worker.exe
 cmd/gui/plugins
+.private/
