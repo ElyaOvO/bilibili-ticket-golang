@@ -291,6 +291,10 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 		if message == "" {
 			message = "purchase API returned no order"
 		}
+		// Format as "msg (code)" for frontend, except for transient 429/412.
+		if outcome.Code != 429 && outcome.Code != 412 && outcome.Err == nil {
+			message = fmt.Sprintf("%s (%d)", message, outcome.Code)
+		}
 		emit("response", message, outcome.Code, classification.Retryable)
 		if outcome.OrderID != "" && classification.Reason == domain.FailureNone && !classification.Retryable {
 			result.Success, result.OrderID = true, outcome.OrderID

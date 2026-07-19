@@ -562,6 +562,35 @@ func TestDisarmMacroPersistsStoppedState(t *testing.T) {
 	}
 }
 
+func TestForceResetMacroClearsActiveAttemptAndBusyResources(t *testing.T) {
+	r := &repo{}
+	d := New(&client{}, r, nil)
+	plan := IntentPlan{Macro: dispatchMacro("m", 0), Intent: dispatchIntent("i", "m", 1, "buyer")}
+	d.Add(plan)
+	value := domain.ExecutionAttempt{ID: "a", IntentID: "i", AccountID: "account", WorkerID: "worker", State: domain.AttemptStopping}
+	if err := d.RestoreAttempt(value); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.ForceResetMacro(context.Background(), "m"); err != nil {
+		t.Fatal(err)
+	}
+
+	if d.MacroActive("m") {
+		t.Fatal("force-reset macro is still active")
+	}
+	got := d.attempts["a"].value
+	if got.State != domain.AttemptStopped || got.Result.State != domain.AttemptStopped || got.ResultAcknowledged {
+		t.Fatalf("unexpected force-reset attempt: %#v", got)
+	}
+	if _, ok := d.accountBusy["account"]; ok {
+		t.Fatal("force-reset account is still busy")
+	}
+	if _, ok := d.workerBusy["worker"]; ok {
+		t.Fatal("force-reset worker is still busy")
+	}
+}
+
 func TestReplicasUseDistinctAccountsAndWorkers(t *testing.T) {
 	c := &client{states: make(map[string]WorkerStatus)}
 	d := New(c, nil, nil)

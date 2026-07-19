@@ -289,3 +289,16 @@ func maskToken(s string) string {
 	}
 	return s[:2] + ".." + s[len(s)-2:]
 }
+
+func (c *BiliClient) getBiliTicket() string {
+	if c.cookieJar == nil {
+		return ""
+	}
+	bilibiliURL, _ := url.Parse("https://www.bilibili.com/")
+	for _, cookie := range c.cookieJar.Cookies(bilibiliURL) {
+		if cookie.Name == "bili_ticket" {
+			return cookie.Value
+		}
+	}
+	return ""
+}

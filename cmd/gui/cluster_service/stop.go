@@ -71,6 +71,13 @@ func (s *ClusterService) forceStopTaskGroup(taskGroupID string) error {
 	if err != nil {
 		return err
 	}
+	// Ask workers to stop and disarm the plans first. Force-resetting only the
+	// database is insufficient because the dispatcher also keeps attempts in
+	// memory; DisarmMacro would otherwise turn them back into stopping
+	// tombstones and leave the group looking active.
+	if err := s.stopTaskGroupInternal(ctx, taskGroupID); err != nil {
+		return err
+	}
 	for _, macro := range macros {
 		if macro.TaskGroupID != taskGroupID {
 			continue
@@ -78,8 +85,11 @@ func (s *ClusterService) forceStopTaskGroup(taskGroupID string) error {
 		if resetErr := s.repository.ForceResetMacroExecution(ctx, macro.ID); resetErr != nil {
 			return fmt.Errorf("force reset macro %s: %w", macro.ID, resetErr)
 		}
+		if resetErr := s.dispatcher.ForceResetMacro(ctx, macro.ID); resetErr != nil {
+			return fmt.Errorf("force reset in-memory macro %s: %w", macro.ID, resetErr)
+		}
 	}
-	return s.stopTaskGroupInternal(ctx, taskGroupID)
+	return nil
 }
 
 // ForceRestartTaskGroup force-stops a task group, resets all macros, and

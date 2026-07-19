@@ -308,8 +308,9 @@ func (r *Repository) resetMacroExecution(ctx context.Context, macroID string, fo
 		return err
 	}
 	// Mark all non-terminal attempts as stopped so they don't interfere.
-	if _, err = tx.ExecContext(ctx, `UPDATE attempts SET state=? WHERE state NOT IN (?,?,?,?) AND intent_id IN (SELECT id FROM intents WHERE macro_task_id=?)`,
+	if _, err = tx.ExecContext(ctx, `UPDATE attempts SET state=?, payload=json_set(payload, '$.state', ?, '$.result.state', ?, '$.result.reason', ?, '$.result.message', ?) WHERE state NOT IN (?,?,?,?) AND intent_id IN (SELECT id FROM intents WHERE macro_task_id=?)`,
 		domain.AttemptStopped,
+		domain.AttemptStopped, domain.AttemptStopped, domain.FailureStopped, "macro force-reset by employer",
 		domain.AttemptSucceeded, domain.AttemptPartial, domain.AttemptFailed, domain.AttemptStopped,
 		macroID,
 	); err != nil {

@@ -195,6 +195,7 @@ func newBiliClient(jar http.CookieJar, profile *DeviceProfile) (*BiliClient, err
 			req.SetHeader("User-Agent", ua)
 			req.SetHeader("local_buvid", biliClient.buvid)
 			req.SetHeader("buvid", biliClient.buvid)
+			req.SetHeader("x-bili-ticket", biliClient.getBiliTicket())
 			req.SetHeader("fp_local", biliClient.fingerprint.BuvidLocal)
 			req.SetHeader("fp_remote", biliClient.fingerprint.BuvidLocal)
 

@@ -1,4 +1,4 @@
-//go:build !cloudcontrol && !production
+//go:build !cloudcontrol && (!production || debug)
 
 package cloudbootstrap
 

@@ -359,14 +359,25 @@ func (s *ClusterService) Start(parent context.Context) error {
 	intentByID := make(map[string]domain.LogicalOrderIntent, len(intents))
 	for _, intent := range intents {
 		intentByID[intent.ID] = intent
-		if macro, ok := macroByID[intent.MacroTaskID]; ok {
-			s.dispatcher.Add(dispatcher.IntentPlan{TaskGroup: taskGroupByID[macro.TaskGroupID], Macro: macro, Intent: intent})
-			s.phases[macro.ID] = intent.Phase
-		}
 	}
 	attempts, err := s.repository.ListAttempts(ctx)
 	if err != nil {
 		return global.NewFault("列出尝试记录", err, "检查集群数据库 data/employer.db 是否可读")
+	}
+	// In-process local workers cannot keep executing after the employer exits.
+	// Convert their persisted non-terminal attempts into stopped tombstones and
+	// disarm the corresponding intents before rebuilding dispatcher state. The
+	// tombstones remain unacknowledged, so a success durably recorded just
+	// before the exit can still be discovered from the restarted worker.
+	if err := s.stopStaleLocalAttempts(ctx, workers, intentByID, attempts); err != nil {
+		return err
+	}
+	for _, persisted := range intents {
+		intent := intentByID[persisted.ID]
+		if macro, ok := macroByID[intent.MacroTaskID]; ok {
+			s.dispatcher.Add(dispatcher.IntentPlan{TaskGroup: taskGroupByID[macro.TaskGroupID], Macro: macro, Intent: intent})
+			s.phases[macro.ID] = intent.Phase
+		}
 	}
 	for _, value := range attempts {
 		if intent, known := intentByID[value.IntentID]; known && !intent.Armed && !value.State.Terminal() {
@@ -433,6 +444,47 @@ func (s *ClusterService) Start(parent context.Context) error {
 	// the gRPC servers are ready to accept connections.
 	s.waitForLocalWorkers(ctx, 5*time.Second)
 	started = true
+	return nil
+}
+
+func (s *ClusterService) stopStaleLocalAttempts(ctx context.Context, workers []domain.WorkerNode, intentByID map[string]domain.LogicalOrderIntent, attempts []domain.ExecutionAttempt) error {
+	workerByID := make(map[string]domain.WorkerNode, len(workers))
+	for _, worker := range workers {
+		workerByID[worker.ID] = worker
+	}
+	recoveredAt := time.Now()
+	staleLocalIntents := make(map[string]struct{})
+	for i := range attempts {
+		value := &attempts[i]
+		worker, known := workerByID[value.WorkerID]
+		if !known || worker.Type != domain.WorkerTypeLocal || value.State.Terminal() {
+			continue
+		}
+		value.State = domain.AttemptStopped
+		value.UpdatedAt = recoveredAt
+		value.Result = domain.ExecutionResult{
+			AttemptID: value.ID, IntentID: value.IntentID, SpecHash: value.SpecHash,
+			State: domain.AttemptStopped, Reason: domain.FailureStopped,
+			Message: "local attempt stopped because the employer process restarted", FinishedAt: recoveredAt,
+		}
+		if err := s.repository.PutAttempt(ctx, *value); err != nil {
+			return fmt.Errorf("persist locally stopped attempt %s during recovery: %w", value.ID, err)
+		}
+		staleLocalIntents[value.IntentID] = struct{}{}
+	}
+	for intentID := range staleLocalIntents {
+		intent, known := intentByID[intentID]
+		if !known {
+			continue
+		}
+		intent.Armed = false
+		intent.Terminal = true
+		intent.FailureReason = domain.FailureStopped
+		intentByID[intentID] = intent
+		if err := s.repository.PutIntent(ctx, intent); err != nil {
+			return fmt.Errorf("persist locally stopped intent %s during recovery: %w", intent.ID, err)
+		}
+	}
 	return nil
 }
 

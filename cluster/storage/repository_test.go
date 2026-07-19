@@ -139,6 +139,40 @@ func TestDeleteAttemptsRequiresDurableResultAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestForceResetMacroPersistsStoppedAttemptInPayload(t *testing.T) {
+	r := openTestRepository(t)
+	ctx := context.Background()
+	if err := r.PutTaskGroup(ctx, domain.TaskGroup{ID: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	macro := domain.MacroTask{ID: "m", TaskGroupID: "g", EventDay: "2026-07-01", OrderCapacity: 1}
+	if err := r.PutMacroTask(ctx, macro); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := domain.NewIntent("i", macro, domain.PhasePunctual, []domain.Buyer{{LogicalID: "b"}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.PutIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	attempt := domain.ExecutionAttempt{ID: "a", IntentID: intent.ID, State: domain.AttemptStopping}
+	if err := r.PutAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.ForceResetMacroExecution(ctx, macro.ID); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := r.ListAttempts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].State != domain.AttemptStopped || attempts[0].Result.State != domain.AttemptStopped {
+		t.Fatalf("force-reset payload was not stopped: %#v", attempts)
+	}
+}
+
 func TestClusterEventsCanBeClearedAndOrderRecordsListed(t *testing.T) {
 	r := openTestRepository(t)
 	ctx := context.Background()

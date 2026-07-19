@@ -488,6 +488,56 @@ func (d *Dispatcher) DisarmMacro(macroID string) error {
 	return nil
 }
 
+// ForceResetMacro makes a macro immediately idle in the in-memory dispatcher.
+// Unlike DisarmMacro, this is an explicit operator override: active attempt
+// tombstones are marked stopped so they cannot leave the task group stuck in
+// an "already running" state. They remain in history and can still accept a
+// late terminal worker result because they are not acknowledged here.
+func (d *Dispatcher) ForceResetMacro(ctx context.Context, macroID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := d.now()
+	for intentID, plan := range d.plans {
+		if plan.Macro.ID != macroID {
+			continue
+		}
+		plan.Intent.Armed = false
+		plan.Intent.Succeeded = false
+		plan.Intent.Terminal = true
+		plan.Intent.FailureReason = domain.FailureStopped
+		if d.repository != nil {
+			if err := d.repository.PutIntent(ctx, plan.Intent); err != nil {
+				return err
+			}
+		}
+		for _, current := range d.attempts {
+			if current.planID != intentID || current.value.State.Terminal() {
+				continue
+			}
+			current.isolatedUntil = time.Time{}
+			current.value.State = domain.AttemptStopped
+			current.value.UpdatedAt = now
+			current.value.Result = domain.ExecutionResult{
+				AttemptID:  current.value.ID,
+				IntentID:   current.value.IntentID,
+				SpecHash:   current.value.SpecHash,
+				State:      domain.AttemptStopped,
+				Reason:     domain.FailureStopped,
+				Message:    "macro force-reset by employer",
+				FinishedAt: now,
+			}
+			delete(d.accountBusy, current.value.AccountID)
+			delete(d.workerBusy, current.value.WorkerID)
+			if d.repository != nil {
+				if err := d.repository.PutAttempt(ctx, current.value); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (d *Dispatcher) RemoveMacro(macroID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

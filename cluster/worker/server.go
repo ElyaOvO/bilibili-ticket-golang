@@ -1658,12 +1658,14 @@ func (s *Server) logTask(t *task, stage, message string, code int, retryable boo
 			level = tasklog.LogWarn
 		}
 	}
-	reporting.ReportWorkerTaskLog(tasklog.LogEntry{
-		TaskID:    t.spec.AttemptID,
-		Level:     level,
-		Message:   fmt.Sprintf("[%s] %s", stage, message),
-		Timestamp: entry.Time,
-	}, int64(code), t.employerMachineID, t.executionUID)
+	if stage != "request" && stage != "retry" {
+		reporting.ReportWorkerTaskLog(tasklog.LogEntry{
+			TaskID:    t.spec.AttemptID,
+			Level:     level,
+			Message:   fmt.Sprintf("[%s] %s", stage, message),
+			Timestamp: entry.Time,
+		}, int64(code), t.employerMachineID, t.executionUID)
+	}
 }
 
 func executionUID(credentials domain.Credentials) string {

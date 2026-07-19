@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"bilibili-ticket-golang/cluster/dispatcher"
 	"bilibili-ticket-golang/cluster/domain"
 	clusterstorage "bilibili-ticket-golang/cluster/storage"
 )
@@ -216,6 +217,108 @@ func TestClusterServiceRejectsOverlappingTaskGroupResources(t *testing.T) {
 	}
 	if err := service.StartTaskGroup("group-b", ""); err == nil {
 		t.Fatal("starting a task group with reserved resources owned by another group must be rejected")
+	}
+}
+
+func TestForceStopTaskGroupClearsInMemoryStoppingAttempt(t *testing.T) {
+	service := testClusterService(t)
+	ctx := context.Background()
+	taskGroup := domain.TaskGroup{ID: "group", Name: "test"}
+	if err := service.repository.PutTaskGroup(ctx, taskGroup); err != nil {
+		t.Fatal(err)
+	}
+	macro := domain.MacroTask{ID: "macro", TaskGroupID: taskGroup.ID, EventDay: "2026-07-01", OrderCapacity: 1}
+	if err := service.repository.PutMacroTask(ctx, macro); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := domain.NewIntent("intent", macro, domain.PhasePunctual, []domain.Buyer{{LogicalID: "buyer"}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.repository.PutIntent(ctx, intent); err != nil {
+		t.Fatal(err)
+	}
+	service.dispatcher.Add(dispatcher.IntentPlan{TaskGroup: taskGroup, Macro: macro, Intent: intent})
+	attempt := domain.ExecutionAttempt{ID: "attempt", IntentID: intent.ID, AccountID: "account", WorkerID: "missing-worker", State: domain.AttemptRunning}
+	if err := service.repository.PutAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.dispatcher.RestoreAttempt(attempt); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ForceStopTaskGroup(taskGroup.ID); err != nil {
+		t.Fatal(err)
+	}
+	if service.taskGroupActive(ctx, taskGroup.ID) {
+		t.Fatal("force-stopped task group is still active")
+	}
+	stored, err := service.repository.ListAttempts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].State != domain.AttemptStopped {
+		t.Fatalf("force-stopped attempt was not persisted: %#v", stored)
+	}
+}
+
+func TestRecoveryStopsOnlyStaleLocalAttempts(t *testing.T) {
+	service := testClusterService(t)
+	ctx := context.Background()
+	if err := service.repository.PutTaskGroup(ctx, domain.TaskGroup{ID: "group"}); err != nil {
+		t.Fatal(err)
+	}
+	macro := domain.MacroTask{ID: "macro", TaskGroupID: "group", EventDay: "2026-07-01", OrderCapacity: 1}
+	if err := service.repository.PutMacroTask(ctx, macro); err != nil {
+		t.Fatal(err)
+	}
+	localIntent, err := domain.NewIntent("local-intent", macro, domain.PhasePunctual, []domain.Buyer{{LogicalID: "local-buyer"}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteIntent, err := domain.NewIntent("remote-intent", macro, domain.PhasePunctual, []domain.Buyer{{LogicalID: "remote-buyer"}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, intent := range []domain.LogicalOrderIntent{localIntent, remoteIntent} {
+		if err := service.repository.PutIntent(ctx, intent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	intents := map[string]domain.LogicalOrderIntent{localIntent.ID: localIntent, remoteIntent.ID: remoteIntent}
+	attempts := []domain.ExecutionAttempt{
+		{ID: "local-attempt", IntentID: localIntent.ID, WorkerID: "local", State: domain.AttemptRunning},
+		{ID: "remote-attempt", IntentID: remoteIntent.ID, WorkerID: "remote", State: domain.AttemptRunning},
+	}
+	for _, attempt := range attempts {
+		if err := service.repository.PutAttempt(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workers := []domain.WorkerNode{
+		{ID: "local", Type: domain.WorkerTypeLocal},
+		{ID: "remote", Type: domain.WorkerTypeRemote},
+	}
+
+	if err := service.stopStaleLocalAttempts(ctx, workers, intents, attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts[0].State != domain.AttemptStopped || intents[localIntent.ID].Armed || !intents[localIntent.ID].Terminal {
+		t.Fatalf("local recovery state was not stopped: attempt=%#v intent=%#v", attempts[0], intents[localIntent.ID])
+	}
+	if attempts[1].State != domain.AttemptRunning || !intents[remoteIntent.ID].Armed || intents[remoteIntent.ID].Terminal {
+		t.Fatalf("remote recovery state was changed: attempt=%#v intent=%#v", attempts[1], intents[remoteIntent.ID])
+	}
+	stored, err := service.repository.ListAttempts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := make(map[string]domain.AttemptState, len(stored))
+	for _, attempt := range stored {
+		states[attempt.ID] = attempt.State
+	}
+	if states["local-attempt"] != domain.AttemptStopped || states["remote-attempt"] != domain.AttemptRunning {
+		t.Fatalf("unexpected persisted recovery states: %#v", states)
 	}
 }
 
