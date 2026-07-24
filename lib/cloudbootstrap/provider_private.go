@@ -3,7 +3,7 @@
 package cloudbootstrap
 
 import (
-	privateclient "bilibili-ticket-golang-cloudcontrol/client"
+	privateclient "bilibili-ticket-golang/cloudcontrol/client"
 
 	"bilibili-ticket-golang/lib/cloudcontrol"
 )
