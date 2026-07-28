@@ -23,6 +23,20 @@ func (f *fakeBackend) Attempt(context.Context, domain.ExecutionSpec) Outcome {
 }
 func (f *fakeBackend) Credentials() domain.Credentials { return f.creds }
 
+type eventBackend struct {
+	fakeBackend
+	sink func(Event)
+}
+
+func (b *eventBackend) SetEventSink(sink func(Event)) { b.sink = sink }
+
+func (b *eventBackend) Attempt(ctx context.Context, spec domain.ExecutionSpec) Outcome {
+	if b.sink != nil {
+		b.sink(Event{Stage: "diagnostic", Message: "backend event"})
+	}
+	return b.fakeBackend.Attempt(ctx, spec)
+}
+
 func validSpec() domain.ExecutionSpec {
 	return domain.ExecutionSpec{AttemptID: "a", IntentID: "i", ProjectID: 1, ScreenID: 2, SKUID: 3, Buyers: []domain.Buyer{{LogicalID: "b"}}, StartMode: domain.StartImmediate, Deadline: time.Now().Add(time.Minute), IntervalMS: 1}
 }
@@ -43,6 +57,21 @@ func TestUnknownErrorRetriesAndReturnsCredentials(t *testing.T) {
 	if !foundRetry {
 		t.Fatalf("retry outcome missing from events: %#v", events)
 	}
+}
+
+func TestBackendDiagnosticEventUsesEngineObserver(t *testing.T) {
+	b := &eventBackend{fakeBackend: fakeBackend{outcomes: []Outcome{{Code: 0, OrderID: "order"}}}}
+	var events []Event
+	result := (Engine{Backend: b, Observe: func(event Event) { events = append(events, event) }}).Run(context.Background(), validSpec())
+	if !result.Success {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	for _, event := range events {
+		if event.Stage == "diagnostic" && event.Message == "backend event" && !event.Time.IsZero() {
+			return
+		}
+	}
+	t.Fatalf("backend diagnostic event missing: %#v", events)
 }
 
 func TestUnrecoverableAndCancellation(t *testing.T) {

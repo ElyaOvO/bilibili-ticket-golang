@@ -35,13 +35,34 @@ type BilibiliBackend struct {
 	confirm      *api.ConfirmStruct
 	buyers       []response.TicketBuyer
 	idBind       int
+	projectHot   bool
 	subOrders    []domain.SubOrderResult
 	progressSink func([]domain.SubOrderResult)
+	eventSink    func(Event)
 	submitCount  uint16
 }
 
 func (b *BilibiliBackend) SetProgressSink(sink func([]domain.SubOrderResult)) {
 	b.progressSink = sink
+}
+
+func (b *BilibiliBackend) SetEventSink(sink func(Event)) {
+	b.eventSink = sink
+}
+
+func (b *BilibiliBackend) emitHotProjectMismatch(projectInfoHot, confirmInfoHot bool, action string) {
+	if b.eventSink == nil {
+		return
+	}
+	b.eventSink(Event{
+		Stage: "hot_project_mismatch",
+		Message: fmt.Sprintf(
+			"projectInfoHotProject=%t confirmInfoHotProject=%t action=%s",
+			projectInfoHot,
+			confirmInfoHot,
+			action,
+		),
+	})
 }
 
 func (b *BilibiliBackend) reportSubOrders() []domain.SubOrderResult {
@@ -215,6 +236,66 @@ func (b *BilibiliBackend) Attempt(ctx context.Context, spec domain.ExecutionSpec
 	return Outcome{Code: code, Message: message}
 }
 
+// prepareWithConfirmHotProject treats confirmInfo.hotProject as authoritative.
+// A normal prepare cannot be reused when confirmInfo upgrades the transaction to
+// a hot project because that prepare did not include a CToken. The opposite
+// transition is safe: the prepared tokens remain valid and createV2 can proceed
+// with the normal token strategy.
+func prepareWithConfirmHotProject(
+	initial token.Generator,
+	newHotGenerator func() token.Generator,
+	prepare func(token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error),
+	onMismatch func(currentHotProject, confirmInfoHotProject bool, action string),
+) (*response.RequestTokenAndPToken, *api.ConfirmStruct, token.Generator, error) {
+	tokens, confirm, err := prepare(initial)
+	if err != nil {
+		return nil, nil, initial, err
+	}
+	if !initial.IsHotProject() && confirm.HotProject {
+		if onMismatch != nil {
+			onMismatch(false, true, "restart_with_hot_project_flow")
+		}
+		initial = newHotGenerator()
+		tokens, confirm, err = prepare(initial)
+		if err != nil {
+			return nil, nil, initial, err
+		}
+	}
+	if initial.IsHotProject() && !confirm.HotProject {
+		if onMismatch != nil {
+			onMismatch(true, false, "continue_with_normal_flow")
+		}
+		initial = token.NewNormalTokenGenerator()
+	}
+	return tokens, confirm, initial, nil
+}
+
+func (b *BilibiliBackend) newHotProjectTokenGenerator(projectID int64) token.Generator {
+	ec := token.NewEncodeData(b.client.GetBrowserUA(), fmt.Sprintf("https://mall.bilibili.com/neul-next/ticket-renovation/detail.html?id=%d", projectID))
+	return token.NewCToken2026Generator(ec)
+}
+
+func (b *BilibiliBackend) prepareOrder(projectID string, count int, projectInfoHot bool, initial token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, token.Generator, error) {
+	projectIDInt, _ := strconv.ParseInt(projectID, 10, 64)
+	return prepareWithConfirmHotProject(initial, func() token.Generator {
+		return b.newHotProjectTokenGenerator(projectIDInt)
+	}, func(generator token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
+		tokens, err := b.client.GetRequestTokenAndPToken(generator, projectID, b.sku, count)
+		if err != nil {
+			return nil, nil, fmt.Errorf("prepare token: %w", err)
+		}
+		confirm, err := b.client.GetConfirmInformation(tokens, projectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("confirm info: %w", err)
+		}
+		return tokens, confirm, nil
+	}, func(_, confirmInfoHot bool, action string) {
+		if projectInfoHot != confirmInfoHot {
+			b.emitHotProjectMismatch(projectInfoHot, confirmInfoHot, action)
+		}
+	})
+}
+
 // submitSplitOrders places each ticket as a separate, fully prepared order.
 // Completed orders are retained across Engine retries so a transient failure
 // cannot submit the same buyer twice.
@@ -241,16 +322,13 @@ func (b *BilibiliBackend) submitSplitOrders(ctx context.Context, spec domain.Exe
 		}
 
 		// Prepare count and create count must describe the same transaction.
-		tokens, err := b.client.GetRequestTokenAndPToken(b.tokenGen, pid, b.sku, 1)
+		// confirmInfo.hotProject may override stale project metadata.
+		tokens, confirm, transactionTokenGen, err := b.prepareOrder(pid, 1, b.projectHot, b.tokenGen)
 		if err != nil {
 			wrapped := fmt.Errorf("prepare split order %d: %w", index+1, err)
 			return b.failSubOrder(index, -1, wrapped.Error(), wrapped)
 		}
-		confirm, err := b.client.GetConfirmInformation(tokens, pid)
-		if err != nil {
-			wrapped := fmt.Errorf("confirm split order %d: %w", index+1, err)
-			return b.failSubOrder(index, -1, wrapped.Error(), wrapped)
-		}
+		b.tokenGen = transactionTokenGen
 		generatedAt := time.Now()
 		single := []response.TicketBuyer{buyer}
 
@@ -258,7 +336,7 @@ func (b *BilibiliBackend) submitSplitOrders(ctx context.Context, spec domain.Exe
 		var message string
 		var order api.TicketOrderStruct
 		for priceRetry := 0; priceRetry < 2; priceRetry++ {
-			err, code, message, order = b.client.SubmitOrder(ctx, b.tokenGen, generatedAt, tokens, pid, b.sku, single, confirm)
+			err, code, message, order = b.client.SubmitOrder(ctx, transactionTokenGen, generatedAt, tokens, pid, b.sku, single, confirm)
 			b.submitCount++
 			if err != nil {
 				if code == 429 {
@@ -379,9 +457,9 @@ func (b *BilibiliBackend) prepare(spec domain.ExecutionSpec) Outcome {
 	if err != nil {
 		return Outcome{Err: fmt.Errorf("project info: %w", err)}
 	}
+	b.projectHot = project.IsHotProject
 	if project.IsHotProject {
-		ec := token.NewEncodeData(b.client.GetBrowserUA(), fmt.Sprintf("https://mall.bilibili.com/neul-next/ticket-renovation/detail.html?id=%d", spec.ProjectID))
-		b.tokenGen = token.NewCToken2026Generator(ec)
+		b.tokenGen = b.newHotProjectTokenGenerator(spec.ProjectID)
 	} else {
 		b.tokenGen = token.NewNormalTokenGenerator()
 	}
@@ -414,13 +492,9 @@ func (b *BilibiliBackend) prepare(spec domain.ExecutionSpec) Outcome {
 		b.prepared = true
 		return Outcome{}
 	}
-	b.tokens, err = b.client.GetRequestTokenAndPToken(b.tokenGen, pid, b.sku, len(spec.Buyers))
+	b.tokens, b.confirm, b.tokenGen, err = b.prepareOrder(pid, len(spec.Buyers), project.IsHotProject, b.tokenGen)
 	if err != nil {
-		return Outcome{Err: fmt.Errorf("prepare token: %w", err)}
-	}
-	b.confirm, err = b.client.GetConfirmInformation(b.tokens, pid)
-	if err != nil {
-		return Outcome{Err: fmt.Errorf("confirm info: %w", err)}
+		return Outcome{Err: err}
 	}
 	// Prefer the transaction's own id_bind when it differs from project
 	// metadata. A multi-ticket prepare is discarded before entering split mode.

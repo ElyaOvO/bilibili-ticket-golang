@@ -38,6 +38,12 @@ type ProgressBackend interface {
 	SetProgressSink(func([]domain.SubOrderResult))
 }
 
+// EventBackend emits transaction-level diagnostic events that are not final
+// API outcomes, such as metadata reconciliation during order preparation.
+type EventBackend interface {
+	SetEventSink(func(Event))
+}
+
 type Classification struct {
 	Reason    domain.FailureReason
 	Retryable bool
@@ -182,6 +188,16 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 		if e.Observe != nil {
 			e.Observe(Event{Time: now(), Stage: stage, Message: message, Code: code, Retryable: retryable, CooldownEnd: cooldownEnd})
 		}
+	}
+	if backend, ok := e.Backend.(EventBackend); ok {
+		backend.SetEventSink(func(event Event) {
+			if event.Time.IsZero() {
+				event.Time = now()
+			}
+			if e.Observe != nil {
+				e.Observe(event)
+			}
+		})
 	}
 	reportError := func(code string, err error) {
 		if err == nil || e.ReportError == nil {
