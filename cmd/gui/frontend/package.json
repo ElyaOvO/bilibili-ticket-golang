@@ -33,7 +33,6 @@
     "@vue/tsconfig": "^0.9.1",
     "eslint": "^10.3.0",
     "eslint-config-vuetify": "^4.6.2",
-    "javascript-obfuscator": "^4.1.1",
     "npm-run-all2": "^8.0.4",
     "sass": "^1.99.0",
     "sass-embedded": "^1.99.0",

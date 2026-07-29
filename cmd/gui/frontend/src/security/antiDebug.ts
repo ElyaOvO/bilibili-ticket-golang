@@ -44,6 +44,10 @@ export function installRuntimeGuards() {
   window.addEventListener('keydown', onKeyDown, { capture: true })
   window.addEventListener('contextmenu', onContextMenu, { capture: true })
 
+  // Keep production previews inspectable without weakening the desktop build.
+  // Wails uses its own scheme, so the debugger probe remains active there.
+  if (['127.0.0.1', 'localhost'].includes(window.location.hostname)) return
+
   window.setInterval(() => {
     const startedAt = performance.now()
     debuggerProbe()

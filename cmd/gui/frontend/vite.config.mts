@@ -4,54 +4,11 @@ import Vue from "@vitejs/plugin-vue";
 import Vuetify, { transformAssetUrls } from "vite-plugin-vuetify";
 import Fonts from "unplugin-fonts/vite";
 import Wails from "@wailsio/runtime/plugins/vite";
-import JavaScriptObfuscator from "javascript-obfuscator";
 
 // Utilities
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import { fileURLToPath, URL } from "node:url";
 import Icons from "unplugin-icons/vite";
-
-function productionObfuscation(): Plugin {
-  return {
-    name: "btg-production-obfuscation",
-    apply: "build",
-    enforce: "post",
-    generateBundle(_options, bundle) {
-      for (const output of Object.values(bundle)) {
-        // The entry chunk contains the watermark and runtime guards. Limiting
-        // deep obfuscation to entries keeps lazy-loaded UI chunks reliable and
-        // avoids multiplying the application bundle size.
-        if (output.type !== "chunk" || !output.isEntry) continue;
-
-        output.code = JavaScriptObfuscator.obfuscate(output.code, {
-          compact: true,
-          controlFlowFlattening: true,
-          controlFlowFlatteningThreshold: 0.28,
-          deadCodeInjection: true,
-          debugProtection: true,
-          disableConsoleOutput: true,
-          identifierNamesGenerator: "hexadecimal",
-          numbersToExpressions: true,
-          renameGlobals: true,
-          selfDefending: true,
-          simplify: true,
-          splitStrings: true,
-          splitStringsChunkLength: 8,
-          stringArray: true,
-          stringArrayCallsTransform: true,
-          stringArrayCallsTransformThreshold: 0.5,
-          stringArrayEncoding: ["base64"],
-          stringArrayIndexShift: true,
-          stringArrayRotate: true,
-          stringArrayShuffle: true,
-          stringArrayThreshold: 0.72,
-          transformObjectKeys: false,
-          unicodeEscapeSequence: false,
-        }).getObfuscatedCode();
-      }
-    },
-  };
-}
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -84,7 +41,6 @@ export default defineConfig({
         ],
       },
     }),
-    productionObfuscation(),
   ],
   optimizeDeps: {
     exclude: ["vuetify", "vue-router"],
