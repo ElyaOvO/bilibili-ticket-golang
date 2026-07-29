@@ -218,3 +218,25 @@ func TestClusterEventsCanBeClearedAndOrderRecordsListed(t *testing.T) {
 		t.Fatalf("record=%#v", record)
 	}
 }
+
+func TestClusterEventsArePagedAndFilteredNewestFirst(t *testing.T) {
+	r := openTestRepository(t)
+	ctx := context.Background()
+	for i, payload := range [][]byte{
+		[]byte(`{"workerId":"alpha","message":"old"}`),
+		[]byte(`{"workerId":"beta","message":"middle"}`),
+		[]byte(`{"workerId":"alpha","message":"new"}`),
+	} {
+		if err := r.PutClusterEvent(ctx, int64(i+1), payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, total, err := r.ListClusterEventsPage(ctx, 1, 1, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(page) != 1 || string(page[0]) != `{"workerId":"alpha","message":"old"}` {
+		t.Fatalf("unexpected filtered page: total=%d page=%q", total, page)
+	}
+}

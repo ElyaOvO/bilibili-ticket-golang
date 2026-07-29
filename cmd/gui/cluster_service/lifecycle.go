@@ -108,8 +108,8 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 	client.SetOnCompletedTask(func(workerID string, result domain.ExecutionResult) {
 		log.Printf("[cluster] heartbeat push received: worker=%s attempt=%s success=%v orderID=%s paymentURL=%q",
 			workerID, result.AttemptID, result.Success, result.OrderID, result.PaymentURL)
-		result = service.dispatcher.ProcessCompletedTask(workerID, result)
-		if result.State.Terminal() {
+		result, processed := service.dispatcher.ProcessCompletedTaskWithStatus(workerID, result)
+		if processed && result.State.Terminal() {
 			service.RecordTaskCompleted(workerID, result)
 		}
 	})
@@ -163,6 +163,7 @@ func (s *ClusterService) openPayQRWindow(intent domain.LogicalOrderIntent, resul
 // and launches the background reconciliation loop.
 func (s *ClusterService) Start(parent context.Context) error {
 	log.Printf("[cluster] starting cluster service (employer commit=%s)", global.GitCommit)
+	s.dispatcher.BeginRecovery()
 	ctx, cancel := context.WithCancel(parent)
 	started := false
 	defer func() {
@@ -394,6 +395,7 @@ func (s *ClusterService) Start(parent context.Context) error {
 			return global.NewFault("恢复尝试记录", err, "尝试记录数据可能已损坏，可尝试删除 data/employer.db 重建")
 		}
 	}
+	s.dispatcher.CompleteRecovery()
 	go func() {
 		normalTicker := time.NewTicker(5 * time.Second)
 		fastTicker := time.NewTicker(2 * time.Second)

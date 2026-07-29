@@ -824,7 +824,7 @@ function closeCaptchaDialog() {
                     <th>{{ t('account.colName') }}</th>
                     <th>{{ t('account.colId') }}</th>
                     <th>{{ t('account.colTags') }}</th>
-                    <th>{{ t('account.colStatus') }}</th>
+                    <th class="account-status-header">{{ t('account.colStatus') }}</th>
                     <th>{{ t('account.colActions') }}</th>
                 </tr>
             </thead>
@@ -848,31 +848,33 @@ function closeCaptchaDialog() {
                                 class="text-caption text-medium-emphasis">—</span>
                         </div>
                     </td>
-                    <td>
-                        <v-chip :color="acc.enabled ? 'success' : 'grey'" size="small" variant="tonal">
-                            {{ acc.enabled ? t('account.enabled') : t('account.disabled') }}
-                        </v-chip>
-                        <v-chip v-if="acc.vipStatus === 1" color="pink" size="small" variant="tonal" class="ml-1"
-                            prepend-icon="mdi-crown">
-                            {{ t('account.vip') }}
-                        </v-chip>
-                        <v-tooltip v-if="acc.cooldownUntil" location="bottom">
-                            <template #activator="{ props }">
-                                <v-chip v-bind="props" color="warning" size="small" variant="tonal" class="ml-1">
-                                    <v-icon start size="x-small">mdi-timer-sand</v-icon>
-                                    {{ t('account.cooldown') }}
-                                    <span v-if="cooldownTimers[acc.id]" class="ml-1">({{ t('account.cooldownRemaining',
-                                        { sec: cooldownTimers[acc.id] }) }})</span>
-                                </v-chip>
-                            </template>
-                            <div class="text-caption">
-                                <div v-if="acc.cooldownReason">{{ acc.cooldownReason }}</div>
-                                <div>{{ t('account.cooldownDetail', {
-                                    time: new
-                                        Date(acc.cooldownUntil!).toLocaleTimeString()
-                                }) }}</div>
-                            </div>
-                        </v-tooltip>
+                    <td class="account-status-column">
+                        <div class="account-status-chips">
+                            <v-chip :color="acc.enabled ? 'success' : 'grey'" size="small" variant="tonal">
+                                {{ acc.enabled ? t('account.enabled') : t('account.disabled') }}
+                            </v-chip>
+                            <v-chip v-if="acc.vipStatus === 1" color="pink" size="small" variant="tonal"
+                                prepend-icon="mdi-crown">
+                                {{ t('account.vip') }}
+                            </v-chip>
+                            <v-tooltip v-if="acc.cooldownUntil" location="bottom">
+                                <template #activator="{ props }">
+                                    <v-chip v-bind="props" color="warning" size="small" variant="tonal">
+                                        <v-icon start size="x-small">mdi-timer-sand</v-icon>
+                                        {{ t('account.cooldown') }}
+                                        <span v-if="cooldownTimers[acc.id]" class="ml-1">({{ t('account.cooldownRemaining',
+                                            { sec: cooldownTimers[acc.id] }) }})</span>
+                                    </v-chip>
+                                </template>
+                                <div class="text-caption">
+                                    <div v-if="acc.cooldownReason">{{ acc.cooldownReason }}</div>
+                                    <div>{{ t('account.cooldownDetail', {
+                                        time: new
+                                            Date(acc.cooldownUntil!).toLocaleTimeString()
+                                    }) }}</div>
+                                </div>
+                            </v-tooltip>
+                        </div>
                     </td>
                     <td>
                         <div style="display:flex;gap:4px">
@@ -1135,5 +1137,19 @@ function closeCaptchaDialog() {
 .export-json-textarea :deep(textarea) {
     max-height: 360px;
     overflow: auto;
+}
+
+.account-status-header,
+.account-status-column {
+    min-width: 230px;
+    white-space: nowrap;
+}
+
+.account-status-chips {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 6px;
+    white-space: nowrap;
 }
 </style>

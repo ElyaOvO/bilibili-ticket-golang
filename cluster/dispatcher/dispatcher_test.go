@@ -189,6 +189,40 @@ func TestProcessCompletedTaskPreservesWinningAttemptMessage(t *testing.T) {
 	}
 }
 
+func TestUnknownCompletedTaskIsAcknowledgedAfterRecovery(t *testing.T) {
+	c := &client{}
+	d := New(c, &repo{}, nil)
+	_, workers := resourcesN(1)
+	d.SetResources(nil, workers)
+	d.CompleteRecovery()
+
+	_, processed := d.ProcessCompletedTaskWithStatus(workers[0].ID, domain.ExecutionResult{
+		AttemptID: "cleaned-up", State: domain.AttemptSucceeded, Success: true, OrderID: "order-1",
+	})
+
+	if processed {
+		t.Fatal("orphaned delivery was reported as newly processed")
+	}
+	if len(c.acked) != 1 || c.acked[0] != "cleaned-up" {
+		t.Fatalf("orphaned result was not ACKed: %#v", c.acked)
+	}
+}
+
+func TestUnknownCompletedTaskWaitsUntilRecoveryCompletes(t *testing.T) {
+	c := &client{}
+	d := New(c, &repo{}, nil)
+	_, workers := resourcesN(1)
+	d.SetResources(nil, workers)
+
+	d.ProcessCompletedTaskWithStatus(workers[0].ID, domain.ExecutionResult{
+		AttemptID: "not-restored-yet", State: domain.AttemptSucceeded, Success: true, OrderID: "order-1",
+	})
+
+	if len(c.acked) != 0 {
+		t.Fatalf("startup delivery was ACKed before recovery: %#v", c.acked)
+	}
+}
+
 func TestEverySuccessfulReplicaIsReportedAndPersisted(t *testing.T) {
 	r := &repo{}
 	d := New(&client{}, r, nil)

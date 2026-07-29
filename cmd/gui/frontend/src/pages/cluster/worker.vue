@@ -1155,7 +1155,7 @@ async function cancelBatchDeploy() {
                             density="compact" @update:model-value="toggleAllWorkers(Boolean($event))" />
                     </th>
                     <th style="width:28px"></th>
-                    <th class="text-no-wrap">{{ t('worker.colName') }}</th>
+                    <th class="text-no-wrap worker-name-header">{{ t('worker.colName') }}</th>
                     <th class="text-no-wrap">{{ t('worker.colAddress') }}</th>
                     <th class="text-no-wrap" style="width:1%;white-space:nowrap">{{ t('worker.colStatus') }}</th>
                     <th class="text-no-wrap" style="width:1%;white-space:nowrap">{{ t('worker.colActions') }}</th>
@@ -1172,10 +1172,10 @@ async function cancelBatchDeploy() {
                             <v-icon size="small">{{ expandedWorkers.has(w.id) ? 'mdi-chevron-down' : 'mdi-chevron-right'
                                 }}</v-icon>
                         </td>
-                        <td style="max-width:260px">
-                            <div class="d-flex align-center flex-wrap" style="min-width:0;gap:4px">
+                        <td class="worker-name-column">
+                            <div class="worker-name-cell">
                                 <v-icon start size="small" class="mr-1 flex-shrink-0">mdi-server-network</v-icon>
-                                <span class="font-weight-bold worker-id-full" style="min-width:0">{{ w.name || w.id
+                                <span class="font-weight-bold worker-name-text">{{ w.name || w.id
                                     }}</span>
                                 <v-chip v-if="isLocalWorker(w)" size="x-small" color="info" variant="tonal"
                                     class="ml-1 flex-shrink-0">
@@ -1954,6 +1954,28 @@ async function cancelBatchDeploy() {
     white-space: normal;
     overflow-wrap: anywhere;
     word-break: break-word;
+}
+
+.worker-name-header,
+.worker-name-column {
+    min-width: 240px;
+}
+
+.worker-name-cell {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 4px;
+    min-width: max-content;
+    white-space: nowrap;
+}
+
+.worker-name-text {
+    min-width: 0;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 </style>
 

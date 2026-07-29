@@ -31,6 +31,18 @@ func document(t *testing.T, value any) string {
 	return string(b)
 }
 
+func TestClusterEventLogPageUsesServerSideSearchAndPagination(t *testing.T) {
+	service := testClusterService(t)
+	service.recordEvent(ClusterEvent{Time: time.UnixMilli(1), WorkerID: "alpha", Message: "old"})
+	service.recordEvent(ClusterEvent{Time: time.UnixMilli(2), WorkerID: "beta", Message: "middle"})
+	service.recordEvent(ClusterEvent{Time: time.UnixMilli(3), WorkerID: "alpha", Message: "new"})
+
+	page := service.GetClusterEventLogPage(2, 1, "alpha")
+	if page.Total != 2 || page.Page != 2 || page.PageSize != 1 || len(page.Events) != 1 || page.Events[0].Message != "old" {
+		t.Fatalf("unexpected event page: %#v", page)
+	}
+}
+
 func TestSaveOrderRecordsPersistsEachSubOrderState(t *testing.T) {
 	service := testClusterService(t)
 	intent := domain.LogicalOrderIntent{ID: "intent", MacroTaskID: "macro"}

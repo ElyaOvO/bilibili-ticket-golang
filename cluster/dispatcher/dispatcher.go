@@ -82,6 +82,7 @@ type Dispatcher struct {
 	retryIntervalMs     int64 // global retry interval (0 = use default 500ms)
 	startDelayMs        int64 // global start delay (0 = no early start)
 	authorizeSubmit     func(context.Context, domain.TaskType) error
+	recoveryComplete    bool
 }
 
 // SetSubmitAuthorizer installs a side-effect-free authorization check that is
@@ -579,6 +580,26 @@ func (d *Dispatcher) RestoreAttempt(value domain.ExecutionAttempt) error {
 		d.workerBusy[value.WorkerID] = value.ID
 	}
 	return nil
+}
+
+// BeginRecovery prevents unknown heartbeat results from being acknowledged
+// while persisted scheduler state is being rebuilt.
+func (d *Dispatcher) BeginRecovery() {
+	d.mu.Lock()
+	d.recoveryComplete = false
+	d.mu.Unlock()
+}
+
+// CompleteRecovery marks the point after all persisted plans and attempts have
+// been restored. Before this point, a heartbeat result that is not in memory
+// may simply have arrived during startup and must be retried by the worker.
+// After this point, an unknown terminal result is a stale outbox entry for an
+// attempt whose acknowledged history has already been cleaned up, so it is
+// safe to send the worker another idempotent ACK.
+func (d *Dispatcher) CompleteRecovery() {
+	d.mu.Lock()
+	d.recoveryComplete = true
+	d.mu.Unlock()
 }
 
 func (d *Dispatcher) Attempts() []domain.ExecutionAttempt {
@@ -1173,6 +1194,14 @@ func effectiveWeight(intent domain.LogicalOrderIntent) int {
 // resources, and triggers reconciliation immediately instead of waiting
 // for the periodic poll cycle.
 func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.ExecutionResult) domain.ExecutionResult {
+	processed, _ := d.ProcessCompletedTaskWithStatus(workerID, result)
+	return processed
+}
+
+// ProcessCompletedTaskWithStatus is ProcessCompletedTask plus a boolean that
+// reports whether this delivery caused employer-side processing. Duplicate or
+// orphaned deliveries return false so callers do not emit duplicate events.
+func (d *Dispatcher) ProcessCompletedTaskWithStatus(workerID string, result domain.ExecutionResult) (domain.ExecutionResult, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -1181,8 +1210,23 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 		if !ok {
 			log.Printf("[dispatcher] ProcessCompletedTask SKIP: attempt %s not found (worker=%s, resultState=%s, success=%v)",
 				result.AttemptID, workerID, result.State, result.Success)
+			if d.recoveryComplete && result.State.Terminal() {
+				worker, workerKnown := d.workers[workerID]
+				if !workerKnown {
+					log.Printf("[dispatcher] acknowledge orphaned result attempt=%s: worker %s not found", result.AttemptID, workerID)
+				} else {
+					rpcCtx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+					err := d.client.Ack(rpcCtx, worker, result.AttemptID)
+					cancel()
+					if err != nil {
+						log.Printf("[dispatcher] acknowledge orphaned result attempt=%s worker=%s: %v", result.AttemptID, workerID, err)
+					} else {
+						log.Printf("[dispatcher] acknowledged orphaned result: attempt=%s worker=%s", result.AttemptID, workerID)
+					}
+				}
+			}
 		}
-		return result
+		return result, false
 	}
 
 	log.Printf("[dispatcher] ProcessCompletedTask: attempt=%s worker=%s state=%s success=%v orderID=%s paymentURL=%q",
@@ -1202,21 +1246,21 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	if d.repository != nil {
 		if err := d.repository.PutAttempt(context.Background(), attempt.value); err != nil {
 			log.Printf("[dispatcher] persist pushed result attempt=%s: %v", attempt.value.ID, err)
-			return result
+			return result, true
 		}
 	}
 	plan := d.plans[attempt.planID]
 	if plan == nil {
 		log.Printf("[dispatcher] ProcessCompletedTask cannot map attempt %s to intent %s", attempt.value.ID, attempt.planID)
-		return result
+		return result, true
 	}
 	if err := d.reportNewSubOrders(plan, result); err != nil {
 		log.Printf("[dispatcher] persist pushed progress attempt=%s: %v", attempt.value.ID, err)
-		return result
+		return result, true
 	}
 
 	if !result.State.Terminal() {
-		return result
+		return result, true
 	}
 
 	delete(d.accountBusy, attempt.value.AccountID)
@@ -1237,26 +1281,26 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	if result.Success {
 		if err := d.win(context.Background(), attempt, result); err != nil {
 			log.Printf("[dispatcher] persist pushed success attempt=%s: %v", attempt.value.ID, err)
-			return result
+			return result, true
 		}
 	} else {
 		if result.Partial && d.onPartial != nil {
 			if err := d.onPartial(plan.Intent, result); err != nil {
 				log.Printf("[dispatcher] persist pushed partial attempt=%s: %v", attempt.value.ID, err)
-				return result
+				return result, true
 			}
 		}
 		d.applyFailure(context.Background(), attempt, result)
 		if d.repository != nil {
 			if err := d.repository.PutAttempt(context.Background(), attempt.value); err != nil {
 				log.Printf("[dispatcher] persist pushed failure attempt=%s: %v", attempt.value.ID, err)
-				return result
+				return result, true
 			}
 		}
 	}
 	if err := d.markResultPersisted(context.Background(), attempt); err != nil {
 		log.Printf("[dispatcher] mark pushed result persisted attempt=%s: %v", attempt.value.ID, err)
-		return result
+		return result, true
 	}
 	if err := d.acknowledgeResult(context.Background(), attempt); err != nil {
 		log.Printf("[dispatcher] acknowledge pushed result attempt=%s: %v", attempt.value.ID, err)
@@ -1266,7 +1310,7 @@ func (d *Dispatcher) ProcessCompletedTask(workerID string, result domain.Executi
 	// goroutine to avoid deadlock (ProcessCompletedTask holds d.mu, and
 	// Reconcile also acquires d.mu).
 	go d.Reconcile(context.Background())
-	return result
+	return result, true
 }
 
 func (d *Dispatcher) pickResources(ctx context.Context, plan *IntentPlan) (domain.Account, domain.WorkerNode, bool, error) {

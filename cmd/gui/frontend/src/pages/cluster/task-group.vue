@@ -886,7 +886,10 @@ const allPurchaseGroups = computed(() => {
                                         <v-icon size="16" color="medium-emphasis">mdi-timer-sand</v-icon>
                                         <div class="macro-meta__content">
                                             <span>{{ t('taskGroup.saleTime') }}</span>
-                                            <strong>{{ formatDateTimeRange(m.startAt, m.deadline) }}</strong>
+                                            <strong class="macro-meta__range">
+                                                <span class="macro-meta__range-part">{{ formatDateTime(m.startAt) }}</span>
+                                                <span class="macro-meta__range-part">~ {{ formatDateTime(m.deadline) }}</span>
+                                            </strong>
                                         </div>
                                     </div>
                                 </div>
@@ -900,7 +903,7 @@ const allPurchaseGroups = computed(() => {
                                     </div>
                                     <div v-if="(m.purchaseGroups || []).length > 0" class="macro-group-preview__list">
                                         <div v-for="pg in sortedPurchaseGroups(m)" :key="pg.id" class="pg-mini-card">
-                                            <span class="pg-mini-card__buyers text-truncate">
+                                            <span class="pg-mini-card__buyers">
                                                 {{ purchaseGroupBuyerNames(pg) }}
                                             </span>
                                             <span class="pg-mini-card__meta">×{{ pg.weight || 1 }} · P{{
@@ -1331,12 +1334,14 @@ const allPurchaseGroups = computed(() => {
 
 :deep(.macro-panel-title) {
     align-items: stretch;
-    padding: 12px 16px;
+    padding: 12px 52px 12px 16px;
 }
 
 :deep(.macro-panel-title .v-expansion-panel-title__icon) {
-    align-self: center;
-    margin-left: 12px;
+    position: absolute;
+    top: 20px;
+    right: 16px;
+    margin: 0;
 }
 
 .macro-summary {
@@ -1397,19 +1402,19 @@ const allPurchaseGroups = computed(() => {
 
 .macro-summary__actions {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 6px;
     flex-shrink: 0;
 }
 
 .macro-summary__delete {
-    margin-top: -6px;
+    margin-top: 0;
     margin-right: -6px;
 }
 
 .macro-summary__meta {
     display: grid;
-    grid-template-columns: minmax(180px, 1fr) minmax(210px, 1fr) minmax(280px, 1.3fr);
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
     gap: 8px;
     margin-top: 12px;
 }
@@ -1427,6 +1432,7 @@ const allPurchaseGroups = computed(() => {
 
 .macro-meta__content {
     min-width: 0;
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -1439,9 +1445,9 @@ const allPurchaseGroups = computed(() => {
 
 .macro-meta__content strong {
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
     font-size: 0.78rem;
     font-weight: 600;
     color: rgba(var(--v-theme-on-surface), 0.86);
@@ -1473,6 +1479,7 @@ const allPurchaseGroups = computed(() => {
 .pg-mini-card {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     min-width: 0;
     padding: 6px 8px;
@@ -1483,14 +1490,36 @@ const allPurchaseGroups = computed(() => {
 
 .pg-mini-card__buyers {
     min-width: 0;
-    flex: 1;
+    flex: 1 1 180px;
+    white-space: normal;
+    overflow-wrap: anywhere;
     font-size: 0.78rem;
     font-weight: 600;
     color: rgba(var(--v-theme-on-surface), 0.86);
 }
 
+.macro-meta__range {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 4px;
+    width: 100%;
+    max-width: 100%;
+    overflow: visible;
+    text-overflow: clip;
+}
+
+.macro-meta__content .macro-meta__range-part {
+    max-width: 100%;
+    color: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    overflow-wrap: anywhere;
+}
+
 .pg-mini-card__meta {
     flex-shrink: 0;
+    margin-left: auto;
     font-size: 0.72rem;
     color: rgba(var(--v-theme-on-surface), 0.52);
 }

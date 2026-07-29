@@ -13,6 +13,11 @@ import (
 
 const maxEventLogSize = 5000
 
+const (
+	defaultEventPageSize = 20
+	maxEventPageSize     = 50
+)
+
 // recordEvent appends an event to the ring buffer, trimming old entries
 // when the capacity is exceeded.
 func (s *ClusterService) recordEvent(e ClusterEvent) {
@@ -183,6 +188,65 @@ func (s *ClusterService) GetClusterEventLog() ClusterEventLog {
 	events := make([]ClusterEvent, len(s.eventLog))
 	copy(events, s.eventLog)
 	return ClusterEventLog{Events: events}
+}
+
+// GetClusterEventLogPage returns only the requested event page. Search and
+// pagination are applied before JSON decoding so the 3-second UI refresh does
+// not repeatedly transfer and rebuild thousands of rows.
+func (s *ClusterService) GetClusterEventLogPage(page, pageSize int, search string) ClusterEventPage {
+	page, pageSize = normalizeEventPage(page, pageSize)
+	offset := (page - 1) * pageSize
+	if s.repository != nil {
+		payloads, total, err := s.repository.ListClusterEventsPage(context.Background(), pageSize, offset, search)
+		if err == nil {
+			events := make([]ClusterEvent, 0, len(payloads))
+			for _, payload := range payloads {
+				var event ClusterEvent
+				if decodeErr := json.Unmarshal(payload, &event); decodeErr == nil {
+					events = append(events, event)
+				}
+			}
+			return ClusterEventPage{Events: events, Total: total, Page: page, PageSize: pageSize}
+		}
+		log.Printf("[cluster] list persisted cluster event page failed: %v", err)
+	}
+
+	search = strings.ToLower(strings.TrimSpace(search))
+	s.mu.RLock()
+	matched := make([]ClusterEvent, 0, len(s.eventLog))
+	for i := len(s.eventLog) - 1; i >= 0; i-- {
+		event := s.eventLog[i]
+		if search != "" {
+			payload, _ := json.Marshal(event)
+			if !strings.Contains(strings.ToLower(string(payload)), search) {
+				continue
+			}
+		}
+		matched = append(matched, event)
+	}
+	s.mu.RUnlock()
+	total := len(matched)
+	if offset >= total {
+		return ClusterEventPage{Events: []ClusterEvent{}, Total: int64(total), Page: page, PageSize: pageSize}
+	}
+	end := offset + pageSize
+	if end > total {
+		end = total
+	}
+	return ClusterEventPage{Events: matched[offset:end], Total: int64(total), Page: page, PageSize: pageSize}
+}
+
+func normalizeEventPage(page, pageSize int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = defaultEventPageSize
+	}
+	if pageSize > maxEventPageSize {
+		pageSize = maxEventPageSize
+	}
+	return page, pageSize
 }
 
 func (s *ClusterService) ClearClusterEventLog() (int64, error) {

@@ -918,20 +918,46 @@ func (r *Repository) ListClusterEvents(ctx context.Context, limit int) ([][]byte
 	if limit <= 0 {
 		limit = 5000
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT payload FROM cluster_events ORDER BY ts DESC, id DESC LIMIT ?`, limit)
+	result, _, err := r.ListClusterEventsPage(ctx, limit, 0, "")
+	return result, err
+}
+
+// ListClusterEventsPage returns one newest-first page and the total number of
+// matching rows. Filtering happens in SQLite so the frontend never needs to
+// fetch and render the complete event history on every refresh.
+func (r *Repository) ListClusterEventsPage(ctx context.Context, limit, offset int, search string) ([][]byte, int64, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	search = strings.TrimSpace(search)
+	where := ""
+	var filterArgs []any
+	if search != "" {
+		where = ` WHERE instr(lower(CAST(payload AS TEXT)), lower(?)) > 0`
+		filterArgs = append(filterArgs, search)
+	}
+	var total int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM cluster_events`+where, filterArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	queryArgs := append(append([]any(nil), filterArgs...), limit, offset)
+	rows, err := r.db.QueryContext(ctx, `SELECT payload FROM cluster_events`+where+` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var result [][]byte
 	for rows.Next() {
 		var payload []byte
 		if err := rows.Scan(&payload); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		result = append(result, append([]byte(nil), payload...))
 	}
-	return result, rows.Err()
+	return result, total, rows.Err()
 }
 
 func (r *Repository) ClearClusterEvents(ctx context.Context) (int64, error) {

@@ -145,6 +145,15 @@ type ClusterEventLog struct {
 	Events []ClusterEvent `json:"events"`
 }
 
+// ClusterEventPage is a bounded, newest-first slice of the persisted event
+// history. Total is the number of rows matching the current search.
+type ClusterEventPage struct {
+	Events   []ClusterEvent `json:"events"`
+	Total    int64          `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"pageSize"`
+}
+
 // OrderRecordList is returned to the frontend order history page.
 type OrderRecordList struct {
 	Records []domain.OrderRecord `json:"records"`
