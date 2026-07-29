@@ -1,38 +1,38 @@
 // Plugins
-import Components from 'unplugin-vue-components/vite'
-import Vue from '@vitejs/plugin-vue'
-import Vuetify, { transformAssetUrls } from 'vite-plugin-vuetify'
-import Fonts from 'unplugin-fonts/vite'
-import Wails from '@wailsio/runtime/plugins/vite'
-import JavaScriptObfuscator from 'javascript-obfuscator'
+import Components from "unplugin-vue-components/vite";
+import Vue from "@vitejs/plugin-vue";
+import Vuetify, { transformAssetUrls } from "vite-plugin-vuetify";
+import Fonts from "unplugin-fonts/vite";
+import Wails from "@wailsio/runtime/plugins/vite";
+import JavaScriptObfuscator from "javascript-obfuscator";
 
 // Utilities
-import { defineConfig, type Plugin } from 'vite'
-import { fileURLToPath, URL } from 'node:url'
-import Icons from 'unplugin-icons/vite'
+import { defineConfig, type Plugin } from "vite";
+import { fileURLToPath, URL } from "node:url";
+import Icons from "unplugin-icons/vite";
 
 function productionObfuscation(): Plugin {
   return {
-    name: 'btg-production-obfuscation',
-    apply: 'build',
-    enforce: 'post',
+    name: "btg-production-obfuscation",
+    apply: "build",
+    enforce: "post",
     generateBundle(_options, bundle) {
       for (const output of Object.values(bundle)) {
         // The entry chunk contains the watermark and runtime guards. Limiting
         // deep obfuscation to entries keeps lazy-loaded UI chunks reliable and
         // avoids multiplying the application bundle size.
-        if (output.type !== 'chunk' || !output.isEntry) continue
+        if (output.type !== "chunk" || !output.isEntry) continue;
 
         output.code = JavaScriptObfuscator.obfuscate(output.code, {
           compact: true,
           controlFlowFlattening: true,
           controlFlowFlatteningThreshold: 0.28,
-          deadCodeInjection: false,
-          debugProtection: false,
+          deadCodeInjection: true,
+          debugProtection: true,
           disableConsoleOutput: true,
-          identifierNamesGenerator: 'hexadecimal',
+          identifierNamesGenerator: "hexadecimal",
           numbersToExpressions: true,
-          renameGlobals: false,
+          renameGlobals: true,
           selfDefending: true,
           simplify: true,
           splitStrings: true,
@@ -40,23 +40,23 @@ function productionObfuscation(): Plugin {
           stringArray: true,
           stringArrayCallsTransform: true,
           stringArrayCallsTransformThreshold: 0.5,
-          stringArrayEncoding: ['base64'],
+          stringArrayEncoding: ["base64"],
           stringArrayIndexShift: true,
           stringArrayRotate: true,
           stringArrayShuffle: true,
           stringArrayThreshold: 0.72,
           transformObjectKeys: false,
           unicodeEscapeSequence: false,
-        }).getObfuscatedCode()
+        }).getObfuscatedCode();
       }
     },
-  }
+  };
 }
 
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
-    Wails('./bindings'),
+    Wails("./bindings"),
     Vue({
       template: { transformAssetUrls },
     }),
@@ -64,22 +64,22 @@ export default defineConfig({
     Vuetify({
       autoImport: true,
       styles: {
-        configFile: 'src/styles/settings.scss',
+        configFile: "src/styles/settings.scss",
       },
     }),
     Icons({
-      compiler: 'vue3',
+      compiler: "vue3",
     }),
     Components({
-      dts: 'src/components.d.ts',
+      dts: "src/components.d.ts",
     }),
     Fonts({
       fontsource: {
         families: [
           {
-            name: 'Roboto',
+            name: "Roboto",
             weights: [100, 300, 400, 500, 700, 900],
-            styles: ['normal', 'italic'],
+            styles: ["normal", "italic"],
           },
         ],
       },
@@ -87,28 +87,17 @@ export default defineConfig({
     productionObfuscation(),
   ],
   optimizeDeps: {
-    exclude: [
-      'vuetify',
-      'vue-router',
-    ],
+    exclude: ["vuetify", "vue-router"],
   },
-  define: { 'process.env': {} },
+  define: { "process.env": {} },
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('src', import.meta.url)),
+      "@": fileURLToPath(new URL("src", import.meta.url)),
     },
-    extensions: [
-      '.js',
-      '.json',
-      '.jsx',
-      '.mjs',
-      '.ts',
-      '.tsx',
-      '.vue',
-    ],
+    extensions: [".js", ".json", ".jsx", ".mjs", ".ts", ".tsx", ".vue"],
   },
   server: {
-    host: '127.0.0.1',
+    host: "127.0.0.1",
     port: Number(process.env.WAILS_VITE_PORT) || 3000,
     strictPort: true,
   },
@@ -117,10 +106,10 @@ export default defineConfig({
     reportCompressedSize: false,
     rollupOptions: {
       output: {
-        entryFileNames: 'assets/[name]-[hash].js',
-        chunkFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash][extname]',
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
       },
     },
   },
-})
+});
