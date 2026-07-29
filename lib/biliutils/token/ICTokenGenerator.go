@@ -2,8 +2,9 @@ package token
 
 import "time"
 
-// Generator defines the token generation strategy for Bilibili ticket ordering.
-type Generator interface {
+// ICTokenGenerator defines the token generation strategy used by Bilibili
+// ticket ordering.
+type ICTokenGenerator interface {
 	GenerateTokenPrepareStage() string
 	GenerateTokenCreateStage(whenGenPToken time.Time) string
 	IsHotProject() bool

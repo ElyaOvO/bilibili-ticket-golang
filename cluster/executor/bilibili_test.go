@@ -33,8 +33,8 @@ func TestPrepareWithConfirmHotProjectRestartsFalseToTrue(t *testing.T) {
 	var mismatchAction string
 	tokens, confirm, generator, err := prepareWithConfirmHotProject(
 		token.NewNormalTokenGenerator(),
-		func() token.Generator { return hotTokenGeneratorStub{} },
-		func(generator token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
+		func() token.ICTokenGenerator { return hotTokenGeneratorStub{} },
+		func(generator token.ICTokenGenerator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
 			calls++
 			return &response.RequestTokenAndPToken{RequestToken: generator.GenerateTokenPrepareStage()},
 				&api.ConfirmStruct{HotProject: true}, nil
@@ -59,11 +59,11 @@ func TestPrepareWithConfirmHotProjectContinuesTrueToFalse(t *testing.T) {
 	var mismatchAction string
 	tokens, confirm, generator, err := prepareWithConfirmHotProject(
 		hotTokenGeneratorStub{},
-		func() token.Generator {
+		func() token.ICTokenGenerator {
 			t.Fatal("true-to-false must not restart preparation")
 			return nil
 		},
-		func(generator token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
+		func(generator token.ICTokenGenerator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
 			calls++
 			return &response.RequestTokenAndPToken{RequestToken: generator.GenerateTokenPrepareStage()},
 				&api.ConfirmStruct{HotProject: false}, nil

@@ -183,7 +183,7 @@ func (c *BiliClient) GetTicketSkuIDsByProjectID(projectID string) ([]r.TicketSku
 //
 // For hot projects, a CToken (window-stats-based token) is generated and included
 // in the prepare request. count is the number of tickets to purchase.
-func (c *BiliClient) GetRequestTokenAndPToken(tokenGen token.Generator, projectID string, ticket r.TicketSkuScreenID, count int) (*r.RequestTokenAndPToken, error) {
+func (c *BiliClient) GetRequestTokenAndPToken(tokenGen token.ICTokenGenerator, projectID string, ticket r.TicketSkuScreenID, count int) (*r.RequestTokenAndPToken, error) {
 	form := map[string]any{
 		"project_id":         utils.ParseInt64OrDefault(projectID, 0),
 		"screen_id":          ticket.ScreenID,
@@ -262,7 +262,7 @@ func (c *BiliClient) GetConfirmInformation(tokens *r.RequestTokenAndPToken, proj
 //   - buyerType: Ordinary or ForceRealName
 //
 // Returns: error, API response code, API message, and the order result struct.
-func (c *BiliClient) SubmitOrder(ctx context.Context, tokenGen token.Generator, whenGenPToken time.Time, tokens *r.RequestTokenAndPToken, projectID string, ticket r.TicketSkuScreenID, buyers []r.TicketBuyer, confirmInfo *api.ConfirmStruct) (error, int, string, api.TicketOrderStruct) {
+func (c *BiliClient) SubmitOrder(ctx context.Context, tokenGen token.ICTokenGenerator, whenGenPToken time.Time, tokens *r.RequestTokenAndPToken, projectID string, ticket r.TicketSkuScreenID, buyers []r.TicketBuyer, confirmInfo *api.ConfirmStruct) (error, int, string, api.TicketOrderStruct) {
 	select {
 	case <-ctx.Done():
 		return ctx.Err(), -1, "", api.TicketOrderStruct{}

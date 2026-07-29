@@ -28,7 +28,7 @@ type BilibiliBackend struct {
 	credentials  domain.Credentials
 	mu           sync.Mutex
 	prepared     bool
-	tokenGen     token.Generator
+	tokenGen     token.ICTokenGenerator
 	generatedAt  time.Time
 	tokens       *response.RequestTokenAndPToken
 	sku          response.TicketSkuScreenID
@@ -242,11 +242,11 @@ func (b *BilibiliBackend) Attempt(ctx context.Context, spec domain.ExecutionSpec
 // transition is safe: the prepared tokens remain valid and createV2 can proceed
 // with the normal token strategy.
 func prepareWithConfirmHotProject(
-	initial token.Generator,
-	newHotGenerator func() token.Generator,
-	prepare func(token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error),
+	initial token.ICTokenGenerator,
+	newHotGenerator func() token.ICTokenGenerator,
+	prepare func(token.ICTokenGenerator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error),
 	onMismatch func(currentHotProject, confirmInfoHotProject bool, action string),
-) (*response.RequestTokenAndPToken, *api.ConfirmStruct, token.Generator, error) {
+) (*response.RequestTokenAndPToken, *api.ConfirmStruct, token.ICTokenGenerator, error) {
 	tokens, confirm, err := prepare(initial)
 	if err != nil {
 		return nil, nil, initial, err
@@ -270,16 +270,16 @@ func prepareWithConfirmHotProject(
 	return tokens, confirm, initial, nil
 }
 
-func (b *BilibiliBackend) newHotProjectTokenGenerator(projectID int64) token.Generator {
+func (b *BilibiliBackend) newHotProjectTokenGenerator(projectID int64) token.ICTokenGenerator {
 	ec := token.NewEncodeData(b.client.GetBrowserUA(), fmt.Sprintf("https://mall.bilibili.com/neul-next/ticket-renovation/detail.html?id=%d", projectID))
 	return token.NewCToken2026Generator(ec)
 }
 
-func (b *BilibiliBackend) prepareOrder(projectID string, count int, projectInfoHot bool, initial token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, token.Generator, error) {
+func (b *BilibiliBackend) prepareOrder(projectID string, count int, projectInfoHot bool, initial token.ICTokenGenerator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, token.ICTokenGenerator, error) {
 	projectIDInt, _ := strconv.ParseInt(projectID, 10, 64)
-	return prepareWithConfirmHotProject(initial, func() token.Generator {
+	return prepareWithConfirmHotProject(initial, func() token.ICTokenGenerator {
 		return b.newHotProjectTokenGenerator(projectIDInt)
-	}, func(generator token.Generator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
+	}, func(generator token.ICTokenGenerator) (*response.RequestTokenAndPToken, *api.ConfirmStruct, error) {
 		tokens, err := b.client.GetRequestTokenAndPToken(generator, projectID, b.sku, count)
 		if err != nil {
 			return nil, nil, fmt.Errorf("prepare token: %w", err)
