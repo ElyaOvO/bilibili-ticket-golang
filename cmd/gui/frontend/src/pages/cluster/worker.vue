@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessagesStore } from '@/stores/snackbar'
 import {
-    Snapshot,
+    GetWorkerListSnapshot,
     DeleteWorker,
     DisconnectWorker,
     ReconnectWorker,
@@ -225,7 +225,7 @@ function updateCooldownTimers() {
 async function load() {
     loading.value = true
     try {
-        const snap = await Snapshot() as SnapshotExt
+        const snap = await GetWorkerListSnapshot() as SnapshotExt
         workers.value = snap.workers || []
         employerVersion.value = snap.employerVersion || ''
         pruneWorkerSelection()
@@ -252,7 +252,7 @@ let pollInterval: ReturnType<typeof setInterval> | null = null
 
 async function pollLoad() {
     try {
-        const snap = await Snapshot() as SnapshotExt
+        const snap = await GetWorkerListSnapshot() as SnapshotExt
         workers.value = snap.workers || []
         employerVersion.value = snap.employerVersion || ''
         pruneWorkerSelection()

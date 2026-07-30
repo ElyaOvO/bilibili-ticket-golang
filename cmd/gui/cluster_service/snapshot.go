@@ -2,7 +2,6 @@ package cluster_service
 
 import (
 	"context"
-	"log"
 	"strings"
 	"time"
 
@@ -110,38 +109,14 @@ func (s *ClusterService) Snapshot() (ClusterSnapshot, error) {
 				summary.Cooldown = cooldown
 			}
 		}
-		// Fetch live metadata via Health RPC.  The worker always returns
-		// its real version and clock offsets in the response map.
-		if node.Type == domain.WorkerTypeRemote || node.Type == domain.WorkerTypeLocal {
-			healthCtx, healthCancel := context.WithTimeout(ctx, 800*time.Millisecond)
-			health, healthErr := s.client.Health(healthCtx, node)
-			healthCancel()
-			if health != nil {
-				summary.ActiveAttemptID, _ = health["activeAttemptId"].(string)
-				if v, ok := health["version"].(string); ok && v != "" {
-					summary.Version = v
-				}
-				if v, ok := health["bilibiliOffsetMs"].(int64); ok {
-					summary.BilibiliOffsetMs = v
-				}
-				if v, ok := health["ntpOffsetMs"].(int64); ok {
-					summary.NtpOffsetMs = v
-				}
-				// Explicit version-blocked flag from the protocol check.
-				if blocked, ok := health["protocolVersionOk"].(bool); ok && !blocked {
-					summary.VersionBlocked = true
-				}
-			}
-			// If Health succeeded (versions match) and this worker was
-			// previously forced, auto-clear SkipVersionCheck so the next
-			// divergence requires manual approval again.
-			if healthErr == nil && summary.SkipVersionCheck && global.GitCommit != "Development" {
-				log.Printf("[cluster] versions converged for worker %s — clearing SkipVersionCheck", node.ID)
-				node.SkipVersionCheck = false
-				summary.SkipVersionCheck = false
-				_ = s.repository.PutWorker(ctx, node)
-			}
-			_ = healthErr
+		// Resource refresh and reconnect paths perform Health RPCs. Page reads
+		// use cached metadata so navigation never waits on worker I/O.
+		if health, ok := s.client.CachedHealth(node.ID); ok {
+			summary.ActiveAttemptID = health.ActiveAttemptID
+			summary.Version = health.Version
+			summary.BilibiliOffsetMs = health.BilibiliOffsetMs
+			summary.NtpOffsetMs = health.NtpOffsetMs
+			summary.VersionBlocked = !health.ProtocolVersionOK
 		}
 		result.Workers = append(result.Workers, summary)
 	}

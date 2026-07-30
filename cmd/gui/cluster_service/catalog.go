@@ -16,6 +16,8 @@ import (
 
 // SetCatalogClient assigns the employer UI's own Bilibili client for
 // project lookups and main-account sync.
+//
+//wails:ignore
 func (s *ClusterService) SetCatalogClient(client *biliutils.BiliClient) { s.catalog = client }
 
 // SyncMainAccount mirrors the credentials used by the employer UI into the

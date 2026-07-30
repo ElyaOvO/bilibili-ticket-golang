@@ -5,7 +5,7 @@ import { useMessagesStore } from '@/stores/snackbar'
 import AccountPicker from '@/components/cluster/AccountPicker.vue'
 import { filterBuyersBySearch } from '@/composables/buyerSearch'
 import {
-    Snapshot,
+    GetBuyerListSnapshot,
     ProvisionBuyer,
     UpdateBuyerPhone,
     RemoveBuyerFromAccount,
@@ -144,7 +144,7 @@ const batchSelectedBuyers = computed(() =>
 async function load() {
     loading.value = true
     try {
-        const snap = await Snapshot()
+        const snap = await GetBuyerListSnapshot()
         buyers.value = (snap.buyers || []) as BuyerWithAccounts[]
         accounts.value = (snap.accounts || []) as AccountSummary[]
         console.log('[buyers] loaded', buyers.value.length, 'buyers,', accounts.value.length, 'accounts')

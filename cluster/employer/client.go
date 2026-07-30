@@ -36,10 +36,21 @@ type workerConn struct {
 	mu            sync.Mutex
 }
 
+// WorkerHealthInfo is the latest metadata returned by a worker Health RPC.
+// Connectivity is tracked separately by the heartbeat timestamp.
+type WorkerHealthInfo struct {
+	ActiveAttemptID   string
+	Version           string
+	ProtocolVersionOK bool
+	BilibiliOffsetMs  int64
+	NtpOffsetMs       int64
+}
+
 // WorkerClient manages gRPC connections to workers.
 type WorkerClient struct {
 	mu                sync.Mutex
 	workers           map[string]*workerConn
+	healthInfo        map[string]WorkerHealthInfo
 	tlsConfigs        map[string]*tls.Config
 	disconnected      map[string]bool // true = user manually disconnected, skip auto-reconnect
 	employerMachineID string
@@ -49,6 +60,7 @@ type WorkerClient struct {
 func NewWorkerClient() *WorkerClient {
 	return &WorkerClient{
 		workers:      make(map[string]*workerConn),
+		healthInfo:   make(map[string]WorkerHealthInfo),
 		tlsConfigs:   make(map[string]*tls.Config),
 		disconnected: make(map[string]bool),
 	}
@@ -80,6 +92,7 @@ func (c *WorkerClient) SetTLS(workerID string, tlsCfg *tls.Config) {
 		delete(c.workers, workerID)
 	}
 	c.tlsConfigs[workerID] = tlsCfg
+	delete(c.healthInfo, workerID)
 	delete(c.disconnected, workerID) // new TLS config → allow reconnect
 }
 
@@ -102,6 +115,7 @@ func (c *WorkerClient) RemoveTLS(workerID string) {
 		delete(c.workers, workerID)
 	}
 	delete(c.tlsConfigs, workerID)
+	delete(c.healthInfo, workerID)
 	delete(c.disconnected, workerID)
 }
 
@@ -236,6 +250,12 @@ func (c *WorkerClient) startHeartbeat(node domain.WorkerNode, wc *workerConn) {
 			wc.lastHeartbeat = time.Now()
 			wc.mu.Unlock()
 
+			c.mu.Lock()
+			info := c.healthInfo[node.ID]
+			info.ActiveAttemptID = msg.ActiveAttemptId
+			c.healthInfo[node.ID] = info
+			c.mu.Unlock()
+
 			// If the worker pushed a completed task, process it immediately
 			// without waiting for the next polling cycle.
 			if msg.CompletedTask != nil {
@@ -310,6 +330,14 @@ func (c *WorkerClient) LastHeartbeat(workerID string) (time.Time, bool) {
 	wc.mu.Lock()
 	defer wc.mu.Unlock()
 	return wc.lastHeartbeat, !wc.lastHeartbeat.IsZero()
+}
+
+// CachedHealth returns the latest Health RPC metadata without performing I/O.
+func (c *WorkerClient) CachedHealth(workerID string) (WorkerHealthInfo, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, ok := c.healthInfo[workerID]
+	return info, ok
 }
 
 func (c *WorkerClient) Close() {
@@ -650,6 +678,15 @@ func (c *WorkerClient) health(ctx context.Context, node domain.WorkerNode, emplo
 		"bilibiliOffsetMs":  resp.BilibiliOffsetMs,
 		"ntpOffsetMs":       resp.NtpOffsetMs,
 	}
+	c.mu.Lock()
+	c.healthInfo[node.ID] = WorkerHealthInfo{
+		ActiveAttemptID:   resp.ActiveAttemptId,
+		Version:           resp.Version,
+		ProtocolVersionOK: resp.ProtocolVersionOk,
+		BilibiliOffsetMs:  resp.BilibiliOffsetMs,
+		NtpOffsetMs:       resp.NtpOffsetMs,
+	}
+	c.mu.Unlock()
 	versionOK := resp.ProtocolVersionOk
 	if !versionOK {
 		log.Printf("[worker-client] version mismatch with %s: employer=%q worker=%q", node.ID, employerVersion, resp.Version)

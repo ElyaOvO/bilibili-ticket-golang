@@ -31,10 +31,6 @@ func (s *ClusterService) refreshResources(ctx context.Context) error {
 		if !node.Enabled {
 			continue
 		}
-		if node.Type == domain.WorkerTypeLocal {
-			// Local workers are managed in-process; skip health checks.
-			continue
-		}
 		if s.client.IsHealthy(node.ID) {
 			s.dispatcher.MarkWorkerHealthy(node.ID)
 			continue

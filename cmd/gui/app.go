@@ -50,6 +50,26 @@ func NewAppWithClientAndStore(c *biliutils.BiliClient, store *configuration.Data
 	return &App{bili: c, store: store}
 }
 
+// GetAccountStatus returns the current Bilibili login state.
+func (a *App) GetAccountStatus() (*api.GetLoginInfoStruct, error) {
+	return a.bili.GetAccountStatus()
+}
+
+// CheckAndUpdateCookie refreshes the login cookie when necessary.
+func (a *App) CheckAndUpdateCookie() (bool, error) {
+	return a.bili.CheckAndUpdateCookie()
+}
+
+// PersistCookies flushes the current cookie jar through its configured callback.
+func (a *App) PersistCookies() {
+	a.bili.PersistCookies()
+}
+
+// SetRefreshToken stores the token used by cookie refresh.
+func (a *App) SetRefreshToken(token string) {
+	a.bili.SetRefreshToken(token)
+}
+
 // TestFaultError triggers a test Fault error for verifying the frontend error
 // display.  It returns a Fault with file:line, operation name, a simulated
 // underlying error, and a human-readable hint.
@@ -78,6 +98,8 @@ func (a *App) GetLocale() string {
 }
 
 // SetApp stores the Wails v3 application reference for window management.
+//
+//wails:ignore
 func (a *App) SetApp(app *application.App) {
 	a.wailsApp = app
 }
@@ -152,6 +174,8 @@ func (a *App) OpenPayQRWindow(options PayQRWindowOptions) {
 // =============================================================================
 
 // SetCaptchaSolver stores the captcha solving function.
+//
+//wails:ignore
 func (a *App) SetCaptchaSolver(solver biliutils.CaptchaSolverFn) {
 	a.captchaSolver = solver
 }

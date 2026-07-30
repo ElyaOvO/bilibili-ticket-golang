@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { GetAccountStatus, CheckAndUpdateCookie, PersistCookies, SetRefreshToken } from '../../bindings/bilibili-ticket-golang/lib/biliutils/biliclient'
+import { GetAccountStatus, CheckAndUpdateCookie, PersistCookies, SetRefreshToken } from '../../bindings/bilibili-ticket-golang/cmd/gui/app'
 import type * as api from '../../bindings/bilibili-ticket-golang/lib/models/bili/api/models'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -11,7 +11,11 @@ export const useAuthStore = defineStore('auth', () => {
 
     async function checkLoginStatus(): Promise<boolean> {
         try {
-            const status: api.GetLoginInfoStruct = await GetAccountStatus()
+            const status: api.GetLoginInfoStruct | null = await GetAccountStatus()
+            if (!status) {
+                checked.value = true
+                return false
+            }
             isLogin.value = status.isLogin
             if (status.isLogin) {
                 username.value = status.uname || ''

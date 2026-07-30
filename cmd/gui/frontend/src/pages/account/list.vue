@@ -5,7 +5,7 @@ import { useMessagesStore } from '@/stores/snackbar'
 import VueQr from 'vue-qr'
 import GeetestCaptcha from '@/components/GeetestCaptcha.vue'
 import {
-    Snapshot,
+    ListAccountSummaries,
     BeginAccountLogin,
     PollAccountLogin,
     BeginAccountSMSLogin,
@@ -130,8 +130,8 @@ function updateCooldownTimers() {
 async function load() {
     loading.value = true
     try {
-        const snap = await Snapshot()
-        accounts.value = (snap.accounts || []) as AccountSummary[]
+        const result = await ListAccountSummaries()
+        accounts.value = (result || []) as AccountSummary[]
         pruneSelectedAccounts()
         updateCooldownTimers()
     } catch (e: any) {

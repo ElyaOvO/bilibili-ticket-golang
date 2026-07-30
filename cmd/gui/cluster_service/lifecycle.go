@@ -125,19 +125,27 @@ func NewClusterService(repository *clusterstorage.Repository) *ClusterService {
 
 // SetEmployerMachineID configures the identity forwarded to workers for
 // worker-side task-log reporting.
+//
+//wails:ignore
 func (s *ClusterService) SetEmployerMachineID(machineID string) {
 	s.client.SetEmployerMachineID(machineID)
 }
 
 // SetNotifier sets the notification callback invoked on ticket success.
+//
+//wails:ignore
 func (s *ClusterService) SetNotifier(notify func(string)) { s.notify = notify }
 
 // SetApp stores the Wails app reference for opening payment QR windows.
+//
+//wails:ignore
 func (s *ClusterService) SetApp(app *application.App) { s.wailsApp = app }
 
 // SetLocalWorkerSolver installs a captcha solving function on the local
 // worker manager. When set, local workers will use this solver for
 // voucher resolution, and the TestCaptcha gRPC RPC will be functional.
+//
+//wails:ignore
 func (s *ClusterService) SetLocalWorkerSolver(
 	solver func(gt, challenge string) (string, error),
 	tester func() (elapsed, validate, captchaType string, err error),
@@ -331,10 +339,7 @@ func (s *ClusterService) Start(parent context.Context) error {
 	// problems surface immediately instead of waiting for a dispatch.
 	_ = s.refreshResources(ctx)
 
-	// Push the persisted global config to every worker that is now
-	// reachable.  Local workers are skipped in refreshResources' health
-	// loop (they have no RPC health check) but they still need to
-	// receive the retry-interval and start-delay settings.
+	// Push the persisted global config to every worker that is now reachable.
 	s.pushGlobalConfigToAll(context.Background())
 	macros, err := s.repository.ListMacroTasks(ctx)
 	if err != nil {

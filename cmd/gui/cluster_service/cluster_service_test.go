@@ -132,6 +132,51 @@ func TestClusterSnapshotUsesEmptyBuyerArray(t *testing.T) {
 	}
 }
 
+func TestLightweightPageSnapshotsReturnOnlyRequestedResources(t *testing.T) {
+	service := testClusterService(t)
+	ctx := context.Background()
+	account := domain.Account{
+		ID: "bili-123", Name: "account", Enabled: true,
+		Credentials: domain.Credentials{Version: 7},
+	}
+	if err := service.repository.PutAccount(ctx, account, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.repository.PutLogicalBuyer(ctx, domain.Buyer{LogicalID: "buyer", Name: "Buyer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.repository.PutBuyerMapping(ctx, domain.AccountBuyerMapping{
+		AccountID: account.ID, LogicalBuyerID: "buyer", BuyerID: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.repository.PutWorker(ctx, domain.WorkerNode{
+		ID: "worker", Name: "Worker", Type: domain.WorkerTypeRemote, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveTaskGroup(`{"id":"group","name":"Group"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	accounts, err := service.ListAccountSummaries()
+	if err != nil || len(accounts) != 1 || accounts[0].CredentialVersion != 7 {
+		t.Fatalf("unexpected account summaries: %#v, err=%v", accounts, err)
+	}
+	buyers, err := service.GetBuyerListSnapshot()
+	if err != nil || len(buyers.Buyers) != 1 || len(buyers.Accounts) != 1 || buyers.Buyers[0].Accounts[0].UID != "123" {
+		t.Fatalf("unexpected buyer snapshot: %#v, err=%v", buyers, err)
+	}
+	workers, err := service.GetWorkerListSnapshot()
+	if err != nil || len(workers.Workers) != 1 || workers.Workers[0].Healthy {
+		t.Fatalf("unexpected worker snapshot: %#v, err=%v", workers, err)
+	}
+	groups, err := service.ListTaskGroups()
+	if err != nil || len(groups) != 1 || groups[0].ID != "group" {
+		t.Fatalf("unexpected task groups: %#v, err=%v", groups, err)
+	}
+}
+
 func TestClusterServiceEditsAndDeletesPurchaseGroups(t *testing.T) {
 	service := testClusterService(t)
 	if err := service.SaveTaskGroup(`{"id":"group","name":"test"}`); err != nil {

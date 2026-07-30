@@ -3,7 +3,8 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessagesStore } from '@/stores/snackbar'
 import {
-    Snapshot,
+    GetWorkerListSnapshot,
+    ListAccountSummaries,
     CheckBWSBind,
     GetBWSReservationInfo,
     BindBWSTicket,
@@ -101,9 +102,12 @@ const taskLogs = computed(() => {
 // ── Load snapshot ────────────────────────────────────────
 async function loadSnapshot() {
     try {
-        const snap = await Snapshot()
-        accounts.value = (snap.accounts || []) as any[]
-        workers.value = (snap.workers || []) as any[]
+        const [accountList, workerSnapshot] = await Promise.all([
+            ListAccountSummaries(),
+            GetWorkerListSnapshot(),
+        ])
+        accounts.value = (accountList || []) as any[]
+        workers.value = (workerSnapshot.workers || []) as any[]
     } catch (e: any) {
         console.error('BWS: load snapshot failed:', e)
     }

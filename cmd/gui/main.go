@@ -367,7 +367,6 @@ func main() {
 	// Register all services exposed to the frontend as Wails v3 bindings.
 	wailsApp.RegisterService(application.NewService(app))
 	wailsApp.RegisterService(application.NewService(clusterSvc))
-	wailsApp.RegisterService(application.NewService(c))
 	wailsApp.RegisterService(application.NewService(logService))
 	wailsApp.RegisterService(application.NewService(bwsSvc))
 	wailsApp.RegisterService(application.NewService(notifySvc))

@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import router from './router';
 import { useMessagesStore } from './stores/snackbar';
 import {
-  Snapshot,
+  ListTaskGroups,
   SaveTaskGroup,
   DeleteTaskGroup,
 } from '../bindings/bilibili-ticket-golang/cmd/gui/cluster_service/clusterservice'
@@ -54,8 +54,8 @@ const deletingGroup = ref<Record<string, boolean>>({})
 
 async function loadTaskGroups() {
   try {
-    const snap = await Snapshot()
-    taskGroups.value = (snap.taskGroups || []) as TaskGroup[]
+    const groups = await ListTaskGroups()
+    taskGroups.value = (groups || []) as TaskGroup[]
   } catch { /* silent */ }
 }
 
@@ -196,7 +196,11 @@ onMounted(async () => {
     </v-navigation-drawer>
     <v-main>
       <v-container>
-        <router-view />
+        <router-view v-slot="{ Component, route }">
+          <transition name="page" mode="out-in">
+            <component :is="Component" :key="route.path" />
+          </transition>
+        </router-view>
       </v-container>
     </v-main>
     <v-snackbar-queue v-model="messages.queue" closable :total-visible="3" collapsed display-strategy="overflow"
@@ -276,6 +280,31 @@ onMounted(async () => {
   font-size: 2rem;
   font-weight: 700;
   line-height: 2.5rem;
+}
+
+.page-enter-active {
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
+}
+
+.page-leave-active {
+  transition: opacity 90ms ease-in, transform 90ms ease-in;
+}
+
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter-active,
+  .page-leave-active {
+    transition: none;
+  }
 }
 
 .v-table .v-chip,

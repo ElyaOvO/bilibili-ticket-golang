@@ -18,6 +18,8 @@ type FeatureChecker interface {
 
 // SetFeatureChecker wires one cached cloud-control gate into the employer,
 // dispatcher, and all subsequently started in-process workers.
+//
+//wails:ignore
 func (s *ClusterService) SetFeatureChecker(checker FeatureChecker) {
 	s.featureChecker = checker
 	s.dispatcher.SetSubmitAuthorizer(func(_ context.Context, taskType domain.TaskType) error {

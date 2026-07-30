@@ -29,6 +29,18 @@ type ClusterSnapshot struct {
 	EmployerVersion  string              `json:"employerVersion"` // employer build version (git commit hash)
 }
 
+// BuyerListSnapshot contains only the data required by the buyer page.
+type BuyerListSnapshot struct {
+	Buyers   []BuyerWithAccounts `json:"buyers"`
+	Accounts []AccountSummary    `json:"accounts"`
+}
+
+// WorkerListSnapshot contains the worker page data without unrelated cluster state.
+type WorkerListSnapshot struct {
+	Workers         []WorkerSummary `json:"workers"`
+	EmployerVersion string          `json:"employerVersion"`
+}
+
 // BuyerAccountBadge represents an account that owns a particular buyer.
 type BuyerAccountBadge struct {
 	AccountID   string `json:"accountId"`

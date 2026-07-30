@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Snapshot, TestWorkerCaptcha, TestAllWorkersCaptcha } from '../../bindings/bilibili-ticket-golang/cmd/gui/cluster_service/clusterservice'
+import { GetWorkerListSnapshot, TestWorkerCaptcha, TestAllWorkersCaptcha } from '../../bindings/bilibili-ticket-golang/cmd/gui/cluster_service/clusterservice'
 import { GetCaptchaStatus, HasCaptchaDLL, HasCaptchaSolver, TestCaptchaSolver } from '../../bindings/bilibili-ticket-golang/cmd/gui/app'
 
 const { t } = useI18n()
@@ -29,7 +29,7 @@ async function refresh() {
     }
     try { employerSolver.value = !!(await HasCaptchaSolver()) } catch { employerSolver.value = false }
     try {
-        const snap = await Snapshot()
+        const snap = await GetWorkerListSnapshot()
         workers.value = ((snap as any)?.workers || []).filter((w: any) => w.type !== 'local')
     } catch { workers.value = [] }
 }

@@ -7,7 +7,7 @@ import {
     GetRetryInterval, SetRetryInterval,
     GetStartDelay, SetStartDelay,
     GetBuyerManagerWorkerIDs, SetBuyerManagerWorkerIDs,
-    Snapshot,
+    GetWorkerListSnapshot,
 } from '../../bindings/bilibili-ticket-golang/cmd/gui/cluster_service/clusterservice'
 
 const { t, locale } = useI18n()
@@ -46,7 +46,7 @@ async function load() {
         startDelayMs.value = sd
         const [buyerWorkers, snap] = await Promise.all([
             GetBuyerManagerWorkerIDs(),
-            Snapshot(),
+            GetWorkerListSnapshot(),
         ])
         buyerManagerWorkerIds.value = (buyerWorkers && buyerWorkers.length > 0) ? buyerWorkers : ['local']
         workers.value = (snap.workers || []) as any[]
