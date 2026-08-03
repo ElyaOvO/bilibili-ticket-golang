@@ -270,7 +270,7 @@ func (c *BiliClient) GetBrowserUA() string {
 
 func browserUA(appVersion *api.BiliAppVersionStruct) string {
 	return fmt.Sprintf(
-		`Mozilla/5.0 (Linux; Android 12; %s; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/101.0.4951.61 Safari/537.36 BiliApp/%d mobi_app/android isNotchWindow/0 NotchHeight=24 mallVersion/%d mVersion/361 disable_rcmd/0 magent/BILI_H5_ANDROID_12_%s_%d`,
+		`Mozilla/5.0 (Linux; Android 12; %s; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/101.0.4951.61 Safari/537.36 BiliApp/%d mobi_app/android isNotchWindow/0 NotchHeight=24 mallVersion/%d mVersion/366 disable_rcmd/0 magent/BILI_H5_ANDROID_12_%s_%d`,
 		model, appVersion.Build, appVersion.Build, appVersion.Version, appVersion.Build,
 	)
 }
