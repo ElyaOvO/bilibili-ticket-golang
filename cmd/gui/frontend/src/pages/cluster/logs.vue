@@ -355,7 +355,7 @@ function jumpToBottom() { isFollowing.value = true; scrollToBottom() }
 }
 
 .log-virtual {
-    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-family: 'JetBrains Mono', 'Sarasa Mono SC', 'Noto Sans SC Variable', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     font-size: 11px;
     line-height: 1.6;
     background: rgb(var(--v-theme-surface));

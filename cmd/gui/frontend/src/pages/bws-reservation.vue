@@ -437,19 +437,30 @@ onUnmounted(() => {
                 <v-col cols="12" sm="5">
                     <v-select v-model="selectedAccount" :items="accountOptions"
                         :label="t('bwsReservation.selectAccount')" variant="outlined" density="compact" hide-details
-                        @update:model-value="bindChecked = false; bwsResult = null" />
+                        @update:model-value="bindChecked = false; bwsResult = null">
+                        <template #selection="{ item }">
+                            <span class="text-body-2 text-truncate">{{ item.title }}</span>
+                        </template>
+                        <template #item="{ props, item }">
+                            <v-list-item v-bind="props">
+                                <template #title>
+                                    <span class="text-body-2">{{ item.title }}</span>
+                                </template>
+                            </v-list-item>
+                        </template>
+                    </v-select>
                 </v-col>
                 <v-col cols="12" sm="5">
                     <v-select v-model="selectedWorkerID" :items="workerOptions"
                         :label="t('bwsReservation.selectWorker')" variant="outlined" density="compact" hide-details
                         class="worker-select-full" @update:model-value="bindChecked = false; bwsResult = null">
                         <template #selection="{ item }">
-                            <span class="worker-id-full">{{ item.title }}</span>
+                            <span class="text-body-2 worker-id-full">{{ item.title }}</span>
                         </template>
                         <template #item="{ props, item }">
                             <v-list-item v-bind="props">
                                 <template #title>
-                                    <span class="worker-id-full">{{ item.title }}</span>
+                                    <span class="text-body-2 worker-id-full">{{ item.title }}</span>
                                 </template>
                             </v-list-item>
                         </template>

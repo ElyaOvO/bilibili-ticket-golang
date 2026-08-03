@@ -5,6 +5,7 @@ import router from './router'
 import { installRuntimeGuards } from '@/security/antiDebug'
 
 import 'unfonts.css'
+import '@fontsource-variable/noto-sans-sc'
 
 installRuntimeGuards()
 

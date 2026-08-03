@@ -5,6 +5,6 @@
  */
 
 // https://vuetifyjs.com/features/sass-variables/`
-// @use 'vuetify/settings' with (
-//   $color-pack: false
-// );
+@use 'vuetify/settings' with (
+  $body-font-family: var(--v-font-body, 'JetBrains Mono', 'Noto Sans SC Variable', 'Microsoft YaHei UI', 'PingFang SC', sans-serif)
+);

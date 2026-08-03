@@ -259,7 +259,7 @@ const tableHeaders = computed(() => [
 
 <style scoped>
 .events-table :deep(td) {
-    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-family: 'JetBrains Mono', 'Sarasa Mono SC', 'Noto Sans SC Variable', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
     font-size: 11px;
 }
 

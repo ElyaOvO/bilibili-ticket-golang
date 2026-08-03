@@ -718,18 +718,18 @@ const allPurchaseGroups = computed(() => {
                         <v-col cols="12" md="4">
                             <v-text-field v-model.number="groupPaymentTimeoutMinutes"
                                 :label="t('taskGroup.paymentTimeoutMinutes')" type="number" min="1" variant="outlined"
-                                density="compact" :disabled="editingDisabled"
+                                density="compact" hide-details :disabled="editingDisabled"
                                 @update:model-value="markGroupConfigDirty" />
                         </v-col>
                         <v-col cols="12" md="4">
                             <v-text-field v-model.number="groupWaveDurationMinutes"
                                 :label="t('taskGroup.waveDurationMinutes')" type="number" min="1" variant="outlined"
-                                density="compact" :disabled="editingDisabled"
+                                density="compact" hide-details :disabled="editingDisabled"
                                 @update:model-value="markGroupConfigDirty" />
                         </v-col>
                         <v-col cols="12" md="4">
                             <v-text-field v-model.number="groupMaxWaves" :label="t('taskGroup.maxWaves')" type="number"
-                                min="1" variant="outlined" density="compact" :disabled="editingDisabled"
+                                min="1" variant="outlined" density="compact" hide-details :disabled="editingDisabled"
                                 @update:model-value="markGroupConfigDirty" />
                         </v-col>
                         <v-col cols="12">
@@ -772,31 +772,36 @@ const allPurchaseGroups = computed(() => {
                         <v-chip v-if="groupStats.failed > 0" size="small" color="error" variant="tonal">{{
                             t('taskGroup.failed', { count: groupStats.failed }) }}</v-chip>
                         <v-spacer />
-                        <v-btn v-if="!groupRunning" prepend-icon="mdi-play-circle-outline" color="success"
-                            variant="tonal" size="small" :loading="dispatchingAll"
+                        <v-btn v-if="!groupRunning" color="success" variant="tonal" size="small"
+                            :loading="dispatchingAll"
                             :disabled="dispatchableMacros.length === 0 || !workerPoolConfigured"
                             @click="startAllMacros">
+                            <v-icon start size="18">mdi-play-circle-outline</v-icon>
                             {{ t('taskGroup.startAll') }}
                         </v-btn>
-                        <v-btn v-if="!groupRunning" prepend-icon="mdi-fast-forward" color="warning" variant="tonal"
-                            size="small" :loading="dispatchingAll"
+                        <v-btn v-if="!groupRunning" color="warning" variant="tonal" size="small"
+                            :loading="dispatchingAll"
                             :disabled="dispatchableMacros.length === 0 || !workerPoolConfigured"
                             @click="startReflowNow">
+                            <v-icon start size="18">mdi-fast-forward</v-icon>
                             {{ t('taskGroup.startReflowNow') }}
                         </v-btn>
                         <template v-else>
-                            <v-btn prepend-icon="mdi-stop-circle-outline" color="error" variant="tonal" size="small"
-                                :loading="dispatchingAll" @click="stopAllMacros">
+                            <v-btn color="error" variant="tonal" size="small" :loading="dispatchingAll"
+                                @click="stopAllMacros">
+                                <v-icon start size="18">mdi-stop-circle-outline</v-icon>
                                 {{ t('taskGroup.stopAll') }}
                             </v-btn>
-                            <v-btn prepend-icon="mdi-alert-octagon" color="deep-orange" variant="tonal" size="small"
-                                :loading="dispatchingAll" @click="forceStopAllMacros" class="ml-1">
+                            <v-btn color="deep-orange" variant="tonal" size="small" :loading="dispatchingAll"
+                                class="ml-1" @click="forceStopAllMacros">
+                                <v-icon start size="18">mdi-alert-octagon</v-icon>
                                 {{ t('taskGroup.forceStopAll') }}
                             </v-btn>
                         </template>
-                        <v-btn prepend-icon="mdi-refresh" color="warning" variant="tonal" size="small"
+                        <v-btn color="warning" variant="tonal" size="small"
                             :loading="dispatchingAll" :disabled="!workerPoolConfigured" @click="forceRestartAllMacros"
                             class="ml-1">
+                            <v-icon start size="18">mdi-refresh</v-icon>
                             {{ t('taskGroup.forceRestartAll') }}
                         </v-btn>
                     </div>
@@ -1393,7 +1398,7 @@ const allPurchaseGroups = computed(() => {
     flex-shrink: 0;
     font-size: 0.72rem;
     color: rgba(var(--v-theme-on-surface), 0.48);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-family: 'JetBrains Mono', 'Sarasa Mono SC', 'Noto Sans SC Variable', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 .macro-summary__status {

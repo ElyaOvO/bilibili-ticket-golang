@@ -34,8 +34,8 @@ export default defineConfig({
       fontsource: {
         families: [
           {
-            name: "Roboto",
-            weights: [100, 300, 400, 500, 700, 900],
+            name: "JetBrains Mono",
+            weights: [100, 300, 400, 500, 700, 800],
             styles: ["normal", "italic"],
           },
         ],
