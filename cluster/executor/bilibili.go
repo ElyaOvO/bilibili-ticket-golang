@@ -55,7 +55,9 @@ func (b *BilibiliBackend) emitHotProjectMismatch(projectInfoHot, confirmInfoHot 
 		return
 	}
 	b.eventSink(Event{
-		Stage: "hot_project_mismatch",
+		Stage:     "hot_project_mismatch",
+		Code:      -1,
+		Retryable: true,
 		Message: fmt.Sprintf(
 			"projectInfoHotProject=%t confirmInfoHotProject=%t action=%s",
 			projectInfoHot,
@@ -194,10 +196,10 @@ func (b *BilibiliBackend) Attempt(ctx context.Context, spec domain.ExecutionSpec
 	if spec.ReflowStockCheck {
 		stockErr, stock := b.client.StockCheck(ctx, spec.ProjectID, spec.ScreenID, b.sku.SkuID)
 		if stockErr != nil {
-			return Outcome{Code: -1, Message: "stock check failed", Err: stockErr}
-		}
-		// StockStatus: 1 = temporary sold out, 2 = sold out, 3 = has stock
-		if !stock.HasStock && stock.StockStatus != 3 {
+			//skip stock check failure, continue to submit order
+			b.eventSink(Event{Stage: "stock_check_failed", Message: fmt.Sprintf("stock check failed: %v", stockErr), Code: -1, Retryable: true})
+		} else if !stock.HasStock && stock.StockStatus != 3 {
+			// StockStatus: 1 = temporary sold out, 2 = sold out, 3 = has stock
 			switch stock.StockStatus {
 			case 1:
 				return Outcome{Code: -1, Message: "temporary sold out"}

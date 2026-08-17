@@ -23,7 +23,7 @@ func TestEmitHotProjectMismatchEvent(t *testing.T) {
 
 	if event.Stage != "hot_project_mismatch" ||
 		event.Message != "projectInfoHotProject=false confirmInfoHotProject=true action=restart_with_hot_project_flow" ||
-		event.Code != 0 || event.Retryable {
+		event.Code != -1 || !event.Retryable {
 		t.Fatalf("unexpected event: %#v", event)
 	}
 }

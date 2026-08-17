@@ -5,6 +5,37 @@ import (
 	"fmt"
 )
 
+type BilibiliHTTPStatusError struct {
+	StatusCode int
+	Status     string
+	Method     string
+	URL        string
+}
+
+func NewBilibiliHTTPStatusError(statusCode int, status, method, url string) *BilibiliHTTPStatusError {
+	return &BilibiliHTTPStatusError{
+		StatusCode: statusCode,
+		Status:     status,
+		Method:     method,
+		URL:        url,
+	}
+}
+
+func (e *BilibiliHTTPStatusError) Error() string {
+	status := e.Status
+	if status == "" {
+		status = fmt.Sprintf("%d", e.StatusCode)
+	}
+	if e.Method != "" || e.URL != "" {
+		return fmt.Sprintf("%s %s: HTTP %s", e.Method, e.URL, status)
+	}
+	return fmt.Sprintf("HTTP %s", status)
+}
+
+func (e *BilibiliHTTPStatusError) HTTPStatusCode() int {
+	return e.StatusCode
+}
+
 type BilibiliAPIError struct {
 	Code    int
 	Message string

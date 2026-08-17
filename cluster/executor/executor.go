@@ -32,6 +32,20 @@ type Outcome struct {
 	SubOrders     []domain.SubOrderResult
 }
 
+type httpStatusCoder interface {
+	HTTPStatusCode() int
+}
+
+func applyHTTPStatusCode(outcome Outcome) Outcome {
+	var statusErr httpStatusCoder
+	if errors.As(outcome.Err, &statusErr) {
+		if code := statusErr.HTTPStatusCode(); code != 0 {
+			outcome.Code = code
+		}
+	}
+	return outcome
+}
+
 // ProgressBackend reports durable child-order snapshots as split execution
 // advances. The worker installs the sink before the first Attempt call.
 type ProgressBackend interface {
@@ -277,7 +291,7 @@ func (e Engine) Run(ctx context.Context, spec domain.ExecutionSpec) domain.Execu
 			return finish(domain.AttemptFailed, domain.FailureDeadline, "deadline elapsed", false)
 		}
 		emit("request", "starting purchase API transaction", 0, false)
-		outcome := e.Backend.Attempt(ctx, spec)
+		outcome := applyHTTPStatusCode(e.Backend.Attempt(ctx, spec))
 		if outcome.SubOrders != nil {
 			result.SubOrders = append([]domain.SubOrderResult(nil), outcome.SubOrders...)
 			result.Partial = hasPartialSuccess(result.SubOrders)

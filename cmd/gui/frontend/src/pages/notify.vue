@@ -75,7 +75,9 @@ function openEdit(index: number) {
     if (!ch) return
     formType.value = ch.type
     formName.value = ch.name
-    formParams.value = { ...ch.params }
+    formParams.value = Object.fromEntries(
+        Object.entries(ch.params).filter((entry): entry is [string, string] => entry[1] !== undefined),
+    )
     editingIndex.value = index
     showDialog.value = true
 }

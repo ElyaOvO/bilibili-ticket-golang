@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,6 +16,11 @@ type fakeBackend struct {
 	calls    int
 	creds    domain.Credentials
 }
+
+type httpStatusErrorStub struct{ code int }
+
+func (e *httpStatusErrorStub) Error() string       { return fmt.Sprintf("HTTP status %d", e.code) }
+func (e *httpStatusErrorStub) HTTPStatusCode() int { return e.code }
 
 func (f *fakeBackend) Attempt(context.Context, domain.ExecutionSpec) Outcome {
 	o := f.outcomes[f.calls]
@@ -57,6 +63,22 @@ func TestUnknownErrorRetriesAndReturnsCredentials(t *testing.T) {
 	if !foundRetry {
 		t.Fatalf("retry outcome missing from events: %#v", events)
 	}
+}
+
+func TestHTTPStatusCodeFromWrappedErrorDrivesRetry(t *testing.T) {
+	backendErr := fmt.Errorf("prepare token: %w", &httpStatusErrorStub{code: 429})
+	b := &fakeBackend{outcomes: []Outcome{{Err: backendErr}, {Code: 0, OrderID: "order"}}}
+	var events []Event
+	result := (Engine{Backend: b, Observe: func(event Event) { events = append(events, event) }}).Run(context.Background(), validSpec())
+	if !result.Success || b.calls != 2 {
+		t.Fatalf("unexpected result: %#v calls=%d", result, b.calls)
+	}
+	for _, event := range events {
+		if event.Stage == "response" && event.Code == 429 && event.Retryable {
+			return
+		}
+	}
+	t.Fatalf("429 retry outcome missing from events: %#v", events)
 }
 
 func TestBackendDiagnosticEventUsesEngineObserver(t *testing.T) {

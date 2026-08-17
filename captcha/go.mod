@@ -3,6 +3,6 @@ module bilibili-ticket-golang/captcha-solver
 go 1.26.4
 
 require (
-	github.com/ebitengine/purego v0.10.1
+	github.com/ebitengine/purego v0.10.2
 	golang.org/x/sys v0.47.0
 )

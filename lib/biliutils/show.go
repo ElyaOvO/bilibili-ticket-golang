@@ -363,8 +363,11 @@ func (c *BiliClient) SubmitOrder(ctx context.Context, tokenGen token.ICTokenGene
 		form["orderCreateUrl"] = "https://show.bilibili.com/api/ticket/order/createV2"
 	}
 
+	// Never replay createV2 at the HTTP layer because the submission result
+	// may be ambiguous. The executor handles its returned status separately.
 	resp, err := c.client.R().
 		SetContext(ctx).
+		SetRetryCount(0).
 		SetHeader("X-Risk-Header", fmt.Sprintf("platform/h5 uid/%s channel/1 deviceId/%s", c.getUID(), c.GetBuvid3())).
 		SetQueryParamsAnyType(map[string]any{
 			"project_id": projectID,

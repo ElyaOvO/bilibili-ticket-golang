@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +16,8 @@ import (
 )
 
 const model = "SM-S9080"
+
+const http429MaxRetries = 3
 
 // Fingerprint holds device fingerprint data for anti-detection.
 type Fingerprint struct {
@@ -147,6 +150,7 @@ func newBiliClient(jar http.CookieJar, profile *DeviceProfile) (*BiliClient, err
 	httpClient := req.NewClient()
 	httpClient.SetTLSFingerprintAndroid().ImpersonateChrome()
 	httpClient.SetCommonCookies()
+	configureHTTP429Retry(httpClient)
 	if jar != nil {
 		httpClient.SetCookieJar(jar)
 	}
@@ -179,6 +183,7 @@ func newBiliClient(jar http.CookieJar, profile *DeviceProfile) (*BiliClient, err
 					&http.Cookie{Name: "screenInfo", Value: screenInfo},
 					&http.Cookie{Name: "deviceFingerprint", Value: biliClient.fingerprint.DeviceFingerprint},
 					&http.Cookie{Name: "browser_resolution", Value: fmt.Sprintf("%d-%d", 1699, 834)},
+					&http.Cookie{Name: "kfcInfo", Value: biliClient.fingerprint.DeviceFingerprint},
 				)
 			} else {
 				// BiliDroid UA for other endpoints
@@ -242,6 +247,29 @@ func newBiliClient(jar http.CookieJar, profile *DeviceProfile) (*BiliClient, err
 	return biliClient, nil
 }
 
+func configureHTTP429Retry(client *req.Client) {
+	client.
+		SetCommonRetryCount(http429MaxRetries).
+		SetCommonRetryCondition(func(resp *req.Response, err error) bool {
+			return err == nil && resp != nil && resp.GetStatusCode() == http.StatusTooManyRequests
+		}).
+		SetCommonRetryFixedInterval(0)
+	client.OnAfterResponse(func(_ *req.Client, resp *req.Response) error {
+		if resp == nil || resp.Response == nil || resp.GetStatusCode() != http.StatusTooManyRequests {
+			return nil
+		}
+		if resp.Request != nil && resp.Request.RetryAttempt < http429MaxRetries {
+			return nil
+		}
+		method, rawURL := "", ""
+		if resp.Request != nil {
+			method = resp.Request.Method
+			rawURL = resp.Request.RawURL
+		}
+		return errors.NewBilibiliHTTPStatusError(resp.GetStatusCode(), resp.Status, method, rawURL)
+	})
+}
+
 func (c *BiliClient) ExportDeviceProfile() DeviceProfile {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -251,7 +279,10 @@ func (c *BiliClient) ExportDeviceProfile() DeviceProfile {
 // GetBilibiliAppVersion fetches the latest Bilibili Android app version info.
 // This is used to construct realistic User-Agent headers.
 func GetBilibiliAppVersion() (*api.BiliAppVersionStruct, error) {
-	resp, err := req.SetTLSFingerprintChrome().ImpersonateChrome().R().Get("https://app.bilibili.com/x/v2/version?mobi_app=android")
+	client := req.NewClient()
+	client.SetTLSFingerprintChrome().ImpersonateChrome()
+	configureHTTP429Retry(client)
+	resp, err := client.R().Get("https://app.bilibili.com/x/v2/version?mobi_app=android")
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +402,7 @@ func (c *BiliClient) getBuvid34AndBnut() error {
 		c.cookieJar.SetCookies(u, []*http.Cookie{
 			{Name: "buvid3", Value: r.Data.BVUID3, Path: "/", Domain: ".bilibili.com", MaxAge: 60 * 60 * 24 * 365},
 			{Name: "buvid4", Value: r.Data.BVUID4, Path: "/", Domain: ".bilibili.com", MaxAge: 60 * 60 * 24 * 365},
+			{Name: "b_nut", Value: strconv.FormatInt(time.Now().Unix(), 10), Path: "/", Domain: ".bilibili.com", MaxAge: 60 * 60 * 24 * 365},
 		})
 	}
 	return nil
